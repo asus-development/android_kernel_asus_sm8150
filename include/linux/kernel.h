@@ -96,10 +96,6 @@ enum DEVICE_DDRID
 };
 extern enum DEVICE_DDRID g_ASUS_ddrID;
 
-// ASUS_BSP +++ get permissive status
-extern int permissive_enable;
-// ASUS_BSP --- get permissive status
-
 #define USHRT_MAX	((u16)(~0U))
 #define SHRT_MAX	((s16)(USHRT_MAX>>1))
 #define SHRT_MIN	((s16)(-SHRT_MAX - 1))
