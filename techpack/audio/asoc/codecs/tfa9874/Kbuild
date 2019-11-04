@@ -19,15 +19,7 @@
 # export
 # INCS    +=  -include $(AUDIO_ROOT)/config/sdm855autoconf.h
 
-
-ifeq ($(CONFIG_ARCH_SM8150), y)
-
-include $(AUDIO_ROOT)/config/sm8150auto.conf
-export
-INCS    +=  -include $(AUDIO_ROOT)/config/sm8150autoconf.h
-
-endif
-
+AUDIO_ROOT := $(srctree)/techpack/audio
 TFA_INC := $(AUDIO_ROOT)/asoc/codecs/tfa9874/inc
 
 # add version number derived from Git
