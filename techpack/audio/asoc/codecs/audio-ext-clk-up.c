@@ -1,4 +1,4 @@
-/* Copyright (c) 2015-2018, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2015-2019, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -21,6 +21,7 @@
 #include <linux/platform_device.h>
 #include <dt-bindings/clock/qcom,audio-ext-clk.h>
 #include <dsp/q6afe-v2.h>
+#include <dsp/q6core.h>
 #include "audio-ext-clk-up.h"
 
 enum {
@@ -33,6 +34,7 @@ enum {
 	AUDIO_EXT_CLK_LPASS5,
 	AUDIO_EXT_CLK_LPASS6,
 	AUDIO_EXT_CLK_LPASS7,
+	AUDIO_EXT_CLK_LPASS_CORE_HW_VOTE,
 	AUDIO_EXT_CLK_LPASS_MAX,
 	AUDIO_EXT_CLK_MAX = AUDIO_EXT_CLK_LPASS_MAX,
 };
@@ -55,6 +57,7 @@ struct audio_ext_clk_priv {
 	struct afe_clk_set clk_cfg;
 	struct audio_ext_clk audio_clk;
 	const char *clk_name;
+	uint32_t lpass_core_hwvote_client_handle;
 };
 
 static inline struct audio_ext_clk_priv *to_audio_clk(struct clk_hw *hw)
@@ -68,20 +71,18 @@ static int audio_ext_clk_prepare(struct clk_hw *hw)
 	struct pinctrl_info *pnctrl_info = &clk_priv->audio_clk.pnctrl_info;
 	int ret;
 
-	printk("audio-ext-clk-up: %s: clk_src: %d\n", __func__, clk_priv->clk_src);
 	if ((clk_priv->clk_src >= AUDIO_EXT_CLK_LPASS) &&
 		(clk_priv->clk_src < AUDIO_EXT_CLK_LPASS_MAX))  {
 		clk_priv->clk_cfg.enable = 1;
 		ret = afe_set_lpass_clk_cfg(IDX_RSVD_3, &clk_priv->clk_cfg);
 		if (ret < 0) {
-			pr_err("%s afe_set_digital_codec_core_clock failed\n",
+			pr_err_ratelimited("%s afe_set_digital_codec_core_clock failed\n",
 				__func__);
 			return ret;
 		}
 	}
 
 	if (pnctrl_info->pinctrl) {
-		printk("audio-ext-clk-up: %s: pinctrl\n", __func__);
 		ret = pinctrl_select_state(pnctrl_info->pinctrl,
 				pnctrl_info->active);
 		if (ret) {
@@ -91,10 +92,8 @@ static int audio_ext_clk_prepare(struct clk_hw *hw)
 		}
 	}
 
-	if (pnctrl_info->base) {
-		printk("audio-ext-clk-up: %s: write 1 to pinctrl base\n", __func__);
+	if (pnctrl_info->base)
 		iowrite32(1, pnctrl_info->base);
-	}
 	return 0;
 }
 
@@ -104,9 +103,7 @@ static void audio_ext_clk_unprepare(struct clk_hw *hw)
 	struct pinctrl_info *pnctrl_info = &clk_priv->audio_clk.pnctrl_info;
 	int ret;
 
-	printk("audio-ext-clk-up: %s: clk_src: %d\n", __func__, clk_priv->clk_src);
 	if (pnctrl_info->pinctrl) {
-		printk("audio-ext-clk-up: %s: pinctrl\n", __func__);
 		ret = pinctrl_select_state(pnctrl_info->pinctrl,
 					   pnctrl_info->sleep);
 		if (ret) {
@@ -121,14 +118,12 @@ static void audio_ext_clk_unprepare(struct clk_hw *hw)
 		clk_priv->clk_cfg.enable = 0;
 		ret = afe_set_lpass_clk_cfg(IDX_RSVD_3, &clk_priv->clk_cfg);
 		if (ret < 0)
-			pr_err("%s: afe_set_lpass_clk_cfg failed, ret = %d\n",
+			pr_err_ratelimited("%s: afe_set_lpass_clk_cfg failed, ret = %d\n",
 				__func__, ret);
 	}
 
-	if (pnctrl_info->base) {
-		printk("audio-ext-clk-up: %s: write 0 to pinctrl base\n", __func__);
+	if (pnctrl_info->base)
 		iowrite32(0, pnctrl_info->base);
-	}
 }
 
 static u8 audio_ext_clk_get_parent(struct clk_hw *hw)
@@ -149,16 +144,78 @@ static u8 audio_ext_clk_get_parent(struct clk_hw *hw)
 		return 0;
 }
 
+static int lpass_hw_vote_prepare(struct clk_hw *hw)
+{
+	struct audio_ext_clk_priv *clk_priv = to_audio_clk(hw);
+	int ret = 0;
+	int32_t avs_state = 0;
+	uint32_t *client_handle = &clk_priv->lpass_core_hwvote_client_handle;
+
+	printk("%s: enter\n", __func__);
+	if (clk_priv->clk_src == AUDIO_EXT_CLK_LPASS_CORE_HW_VOTE)  {
+		printk("%s: clk_src is AUDIO_EXT_CLK_LPASS_CORE_HW_VOTE\n", __func__);
+		ret = afe_vote_lpass_core_hw(AFE_LPASS_CORE_HW_MACRO_BLOCK,
+					     "LPASS_HW_MACRO",
+					     client_handle);
+		if (ret < 0) {
+			pr_err("%s lpass core hw vote failed %d\n",
+				__func__, ret);
+			/*
+			 * DSP returns -EBUSY when AVS services are not up
+			 * Check for AVS state and then retry voting
+			 * for core hw clock.
+			 */
+			if (ret == -EBUSY) {
+				q6core_is_avs_up(&avs_state);
+				if (avs_state)
+					ret = afe_vote_lpass_core_hw(
+						AFE_LPASS_CORE_HW_MACRO_BLOCK,
+						"LPASS_HW_MACRO",
+						client_handle);
+			}
+			printk("%s: return point 1, ret = %d\n", __func__, ret);
+			return ret;
+		}
+	}
+	printk("%s: return point 2, ret = %d\n", __func__, ret);
+
+	return 0;
+}
+
+static void lpass_hw_vote_unprepare(struct clk_hw *hw)
+{
+	struct audio_ext_clk_priv *clk_priv = to_audio_clk(hw);
+	int ret = 0;
+
+	printk("%s: enter\n", __func__);
+	if (clk_priv->clk_src == AUDIO_EXT_CLK_LPASS_CORE_HW_VOTE) {
+		printk("%s: clk_src is AUDIO_EXT_CLK_LPASS_CORE_HW_VOTE\n", __func__);
+		ret = afe_unvote_lpass_core_hw(
+			AFE_LPASS_CORE_HW_MACRO_BLOCK,
+			clk_priv->lpass_core_hwvote_client_handle);
+		if (ret < 0)
+			pr_err("%s lpass core hw vote failed %d\n",
+				__func__, ret);
+	}
+	printk("%s: return, ret = %d\n", __func__, ret);
+}
+
 static const struct clk_ops audio_ext_clk_ops = {
 	.prepare = audio_ext_clk_prepare,
 	.unprepare = audio_ext_clk_unprepare,
 	.get_parent = audio_ext_clk_get_parent,
 };
 
+static const struct clk_ops lpass_hw_vote_ops = {
+	.prepare = lpass_hw_vote_prepare,
+	.unprepare = lpass_hw_vote_unprepare,
+};
+
 static const char * const audio_ext_pmi_div_clk[] = {
 	"qpnp_clkdiv_1",
 	"pms405_div_clk1",
 	"pm6150_div_clk1",
+	"pm6125_div_clk1",
 };
 
 static int audio_ext_clk_dummy_prepare(struct clk_hw *hw)
@@ -279,6 +336,15 @@ static struct audio_ext_clk audio_clk_array[] = {
 			.hw.init = &(struct clk_init_data){
 				.name = "audio_lpass_mclk7",
 				.ops = &audio_ext_clk_ops,
+			},
+		},
+	},
+	{
+		.pnctrl_info = {NULL},
+		.fact = {
+			.hw.init = &(struct clk_init_data){
+				.name = "lpass_hw_vote_clk",
+				.ops = &lpass_hw_vote_ops,
 			},
 		},
 	},

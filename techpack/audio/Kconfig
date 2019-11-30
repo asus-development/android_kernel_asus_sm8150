@@ -94,8 +94,8 @@ config SND_SOC_SM6150
 	tristate "SND_SOC_SM6150"
 config SND_SOC_SM8150
 	tristate "SND_SOC_SM8150"
-config SND_SOC_TFA9872
-	tristate "SND_SOC_TFA9872"
+config SND_SOC_TFA9874
+	tristate "SND_SOC_TFA9874"
 config SND_SOC_WCD9335
 	tristate "SND_SOC_WCD9335"
 config SND_SOC_WCD934X
