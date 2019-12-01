@@ -37,8 +37,6 @@ EXTRA_CFLAGS += -DDEBUG -DTFA9874_NONDSP_STEREO
 EXTRA_CFLAGS += -I$(TFA_INC)
 # EXTRA_CFLAGS += -Werror
 
-$(info cextra_flag ${EXTRA_CFLAGS})
-
 TFA9874_OBJS += tfa98xx.o
 TFA9874_OBJS += tfa_container.o
 TFA9874_OBJS += tfa_dsp.o
