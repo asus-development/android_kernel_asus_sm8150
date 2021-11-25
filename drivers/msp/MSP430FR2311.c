@@ -360,7 +360,7 @@ do {
 
 extern bool read_kernel_file(const char*, void (*)(char*, unsigned int) );
 
-void read_cali_file() {	
+void read_cali_file(void) {	
 	const char mcu_cali[]= {"/vendor/firmware/mcu_cali"};
 	read_kernel_file(mcu_cali,  process_cali_item);
 }
@@ -592,7 +592,7 @@ static int MSP43FR2311_Update_Firmware(void) {
 }
 
 
-int MSP430FR2311_Get_Steps() {
+int MSP430FR2311_Get_Steps(void) {
 	char getsteps[] = { 0xAA, 0x55, 0x10};
 	char steps[] = { 0, 0};
 //	int i=0;
@@ -653,7 +653,7 @@ extern void asus_extcon_set_name(struct extcon_dev *edev, const char *name);
 struct extcon_dev *mcu_ver_extcon;
 char mcuVersion[13];
 
-void registerMCUVersion() {
+void registerMCUVersion(void) {
 	int rc=0;
 	mcu_ver_extcon = extcon_dev_allocate(asus_fg_extcon_cable);
 	if (IS_ERR(mcu_ver_extcon)) {
@@ -760,7 +760,7 @@ void mcu_loop_test(void) {
 	msleep(delay);
 }
 
-int MSP430FR2311_Pulldown_Drv_Power() {
+int MSP430FR2311_Pulldown_Drv_Power(void) {
 	char MSP430PullDownDrvMode[]={0xAA, 0x55, 0x0E, 0x00};	
 	pr_info("[MSP430FR2311] %s +\n", __func__);
 	if (MCUState<MCU_READY) {
@@ -777,7 +777,7 @@ int MSP430FR2311_Pulldown_Drv_Power() {
 }
 
 
-void mcu_do_later_power_down() {
+void mcu_do_later_power_down(void) {
 
 	mutex_lock(&MSP430FR2311_control_mutex);
 	if (iCloseCounter!=0) {

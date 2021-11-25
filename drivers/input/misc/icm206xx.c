@@ -682,7 +682,7 @@ static bool gyro_data_ready = true;
 static u64 gyro_last_enable_time_ns = 0;
 /*ASUS BSP: this function check if waiting enough time (80ms) since gyro sensor enabled
 			there is a counter used to prevent data always not ready*/
-bool icm_is_gyro_data_ready()
+bool icm_is_gyro_data_ready(void)
 {
 	struct timespec ts;
 	static int l_counter = 0;
@@ -4196,7 +4196,7 @@ static void icm206xx_release_gpios_cci(struct icm_ctrl_t *i_ctrl)
         icm206xx_release_intr(i_ctrl);
 }
 
-static icm206xx_get_dt_info(struct device *dev, struct icm_ctrl_t *i_ctrl)
+static int icm206xx_get_dt_info(struct device *dev, struct icm_ctrl_t *i_ctrl)
 {
         int rc = 0;
         struct device_node *of_node = NULL;
