@@ -999,7 +999,7 @@ static void copy_to_dit_eeprom(struct cam_eeprom_ctrl_t *e_ctrl,uint32_t camera_
 	memcpy(g_dit_eeprom_info[camera_id].mapdata, e_ctrl->cal_data.mapdata, e_ctrl->cal_data.num_data);
 }
 
-static void compareCameraSN()
+static void compareCameraSN(void)
 {
 	static bool DoOnce = false;
 	uint8_t otp_data_id[MAX_CAMERA_ID + 1][OTP_ID_LEN];
