@@ -44,12 +44,34 @@
 #define DEFAULT_PANEL_PREFILL_LINES	25
 #define TICKS_IN_MICRO_SECOND		1000000
 
+//TODO: fix this
+extern int mipi_dsi_dcs_set_display_cabc(struct mipi_dsi_device *dsi);
+extern int mipi_dsi_dcs_set_display_dimming(struct mipi_dsi_device *dsi);
+extern int fts_ts_suspend(void);
+extern int fts_power_source_ctrl_global(int enable);
+extern bool fts_gesture_check(void);
+extern void asus_lcd_dim_conf_apply(void);
+extern void asus_wled_fsc_validate(void);
+extern int g_msm_drv_shutdown_in_progress;
+extern void asus_lcd_cabc_off_locking(void);
+extern void asus_lcd_cabc_restore(void);
+
+extern char asus_lcd_cabc_mode[2];
+extern int asus_lcd_dimming_on;
+extern int asus_lcd_early_backlight;
+extern int asus_lcd_bridge_enable;
+
 enum dsi_dsc_ratio_type {
 	DSC_8BPC_8BPP,
 	DSC_10BPC_8BPP,
 	DSC_12BPC_8BPP,
 	DSC_RATIO_TYPE_MAX
 };
+
+int lastBL = 1023;
+bool first_boot = true;
+int asus_lcd_bridge_enable = 0;
+struct dsi_panel* g_panel = NULL;
 
 static u32 dsi_dsc_rc_buf_thresh[] = {0x0e, 0x1c, 0x2a, 0x38, 0x46, 0x54,
 		0x62, 0x69, 0x70, 0x77, 0x79, 0x7b, 0x7d, 0x7e};
@@ -100,6 +122,20 @@ static char dsi_dsc_rc_range_max_qp_1_1_scr1[][15] = {
  */
 static char dsi_dsc_rc_range_bpg_offset[] = {2, 0, 0, -2, -4, -6, -8, -8,
 		-8, -10, -10, -12, -12, -12, -12};
+
+bool bl_off_to_wait_on = false;
+
+// ASUS_BSP: low backlight controller switch
+#define WLED_MAX_LEVEL_ENABLE           4095
+#define WLED_MIN_LEVEL_DISABLE          0
+#define LCD_BL_THRESHOLD_BOE            160
+static bool g_bl_full_dcs = false;
+static int g_last_bl = 0x0;
+static int g_bl_threshold = LCD_BL_THRESHOLD_BOE;
+static int g_wled_dimming_div = 10;
+
+int g_bl_debounce_target = 128;
+int g_bl_debounce_value  = 144;
 
 int dsi_dsc_create_pps_buf_cmd(struct msm_display_dsc_info *dsc, char *buf,
 				int pps_id)
@@ -435,11 +471,14 @@ static int dsi_panel_power_on(struct dsi_panel *panel)
 {
 	int rc = 0;
 
-	rc = dsi_pwr_enable_regulator(&panel->power_info, true);
-	if (rc) {
-		pr_err("[%s] failed to enable vregs, rc=%d\n", panel->name, rc);
-		goto exit;
-	}
+	if (!fts_gesture_check()) {
+		printk("[Display] gesture disabled, enable regulator\n");
+		rc = dsi_pwr_enable_regulator(&panel->power_info, true);
+		if (rc) {
+			pr_err("[%s] failed to enable vregs, rc=%d\n", panel->name, rc);
+			goto exit;
+		}
+ 	}
 
 	rc = dsi_panel_set_pinctrl_state(panel, true);
 	if (rc) {
@@ -475,11 +514,14 @@ static int dsi_panel_power_off(struct dsi_panel *panel)
 {
 	int rc = 0;
 
+	printk("[Display] dsi_panel_power_off !!!\n");
+
 	if (gpio_is_valid(panel->reset_config.disp_en_gpio))
 		gpio_set_value(panel->reset_config.disp_en_gpio, 0);
 
-	if (gpio_is_valid(panel->reset_config.reset_gpio))
-		gpio_set_value(panel->reset_config.reset_gpio, 0);
+	if (!fts_gesture_check())
+		if (gpio_is_valid(panel->reset_config.reset_gpio))
+			gpio_set_value(panel->reset_config.reset_gpio, 0);
 
 	if (gpio_is_valid(panel->reset_config.lcd_mode_sel_gpio))
 		gpio_set_value(panel->reset_config.lcd_mode_sel_gpio, 0);
@@ -490,9 +532,20 @@ static int dsi_panel_power_off(struct dsi_panel *panel)
 		       rc);
 	}
 
-	rc = dsi_pwr_enable_regulator(&panel->power_info, false);
-	if (rc)
-		pr_err("[%s] failed to enable vregs, rc=%d\n", panel->name, rc);
+	fts_ts_suspend();
+	msleep(3);//power down after reset larger than 3ms
+
+	if (g_msm_drv_shutdown_in_progress) {
+		printk("[Display] shutdown in progress, pull down TP power rail\n");
+		fts_power_source_ctrl_global(0);
+	}
+
+	if (!fts_gesture_check()) {
+		printk("[Display] gesture disabled, disable regulator\n");
+		rc = dsi_pwr_enable_regulator(&panel->power_info, false);
+		if (rc)
+			pr_err("[%s] failed to enable vregs, rc=%d\n", panel->name, rc);
+	}
 
 	return rc;
 }
@@ -627,6 +680,13 @@ static int dsi_panel_update_backlight(struct dsi_panel *panel,
 	if (rc < 0)
 		pr_err("failed to update dcs backlight:%d\n", bl_lvl);
 
+	/* ASUS BSP Display +++ */
+	if (bl_lvl != 0)
+		lastBL = (int)bl_lvl;
+	/* ASUS BSP Display +++ */
+
+	//pr_err("update dcs backlight:%d\n", bl_lvl);
+
 	return rc;
 }
 
@@ -681,21 +741,132 @@ error:
 	return rc;
 }
 
+//
+// dimming WLED brightness change
+//
+static void asus_lcd_led_trigger_dim(struct dsi_backlight_config *bl, int from, int to)
+{
+	int temp;
+	int wled_level = 0;
+
+	for (temp = 0; temp <= g_wled_dimming_div; temp++) {
+		wled_level = (bl->raw_bd->props.max_brightness * (from * 10 + (to - from) * temp)) /\
+				(g_bl_threshold * g_wled_dimming_div);
+		backlight_device_set_brightness(bl->raw_bd, wled_level);
+		msleep(10);
+		pr_debug("[Display] wled set to %d/%d\n", wled_level, bl->raw_bd->props.max_brightness);
+	}
+}
+
+void dsi_panel_set_backlight_asus_logic(struct dsi_panel *panel, u32 bl_level)
+{
+	struct dsi_backlight_config *bl = &panel->bl_config;
+
+	printk("[Display] backlight request: value = %d\n", bl_level);
+
+	if (bl_level == 0) {
+		backlight_device_set_brightness(bl->raw_bd, WLED_MIN_LEVEL_DISABLE);
+		printk("[Display] g_bl_full_dcs ctrl disable\n");
+		g_bl_full_dcs = false;
+	} else if (bl_level < g_bl_threshold) { /*wled control*/
+		if (g_last_bl == 0) {
+			printk("[Display] system resume set BL wled directly\n");
+			backlight_device_set_brightness(bl->raw_bd, 4095 * bl_level / g_bl_threshold);
+			dsi_panel_update_backlight(panel, g_bl_threshold);
+		} else if (bl_level < g_last_bl) {
+			if (g_bl_full_dcs) { // last backlight is full DCS control, set it to threshold
+				dsi_panel_update_backlight(panel, g_bl_threshold);
+			}
+			asus_lcd_led_trigger_dim(bl,
+				(g_last_bl >= g_bl_threshold) ? g_bl_threshold : g_last_bl, bl_level);
+		} else if (g_last_bl < bl_level) {
+			asus_lcd_led_trigger_dim(bl, g_last_bl, bl_level);
+		} else {
+			printk("[Display] Bypass backlight request with same level\n");
+		}
+		g_bl_full_dcs = false;
+	} else { /*dcs control*/
+		if (g_last_bl == 0) {
+			backlight_device_set_brightness(bl->raw_bd, WLED_MAX_LEVEL_ENABLE);
+			printk("[Display] g_bl_full_dcs ctrl enable\n");
+			dsi_panel_update_backlight(panel, bl_level);
+		} else {
+			dsi_panel_update_backlight(panel, bl_level);
+			if (!g_bl_full_dcs) // last time is semi-WLED control
+				asus_lcd_led_trigger_dim(bl, g_last_bl, g_bl_threshold);
+		}
+		g_bl_full_dcs = true;
+	}
+
+	if (bl_level <= g_bl_threshold) {
+		asus_lcd_cabc_off_locking();
+	} else {
+		asus_lcd_cabc_restore();
+	}
+}
+
+void asus_lcd_trigger_early_backlight_wq(u32 level)
+{
+	struct dsi_panel* panel = g_panel;
+
+	if (!g_panel)
+		return;
+
+	panel->early_bl_level = level;
+	queue_work(panel->early_bl_workqueue, &panel->early_bl_work);
+}
+
 int dsi_panel_set_backlight(struct dsi_panel *panel, u32 bl_lvl)
 {
 	int rc = 0;
 	struct dsi_backlight_config *bl = &panel->bl_config;
+	struct mipi_dsi_device *dsi;
 
 	if (panel->host_config.ext_bridge_num)
 		return 0;
 
+	mutex_lock(&panel->bl_lock);
+
 	pr_debug("backlight type:%d lvl:%d\n", bl->type, bl_lvl);
+	if (first_boot) {
+		if (bl_lvl == 4095) {
+			goto finally;
+		}
+
+		printk("[Display] setting WLED to max, backlight = %d\n", bl_lvl);
+		asus_wled_fsc_validate();
+		dsi_panel_update_backlight(panel, bl_lvl);
+		if (bl->raw_bd)
+			rc = backlight_device_set_brightness(bl->raw_bd, bl->raw_bd->props.max_brightness);
+		first_boot = false;
+		g_last_bl = bl_lvl;
+		goto finally;
+	}
+
+	if (bl_lvl >= 4079)
+		bl_lvl = 4079;
+
+	if (bl_lvl == g_bl_debounce_target)
+		bl_lvl = g_bl_debounce_value;
+
+#if 0
+	/*
+	 * lcd birdge is going to enable and both bl level and last bl level
+	 * is zero means this is initialized from crtc
+	 * < this code is disabled, and should not be included in build >
+	 */
+	if (asus_lcd_bridge_enable && !bl_lvl && !g_last_bl) {
+		printk("[Display] this is backlight 0 from display initial, do early backlight here\n");
+		asus_lcd_trigger_early_backlight_wq(32);
+		goto finally;
+	}
+#endif
+
 	switch (bl->type) {
 	case DSI_BACKLIGHT_WLED:
-		rc = backlight_device_set_brightness(bl->raw_bd, bl_lvl);
-		break;
+		backlight_device_set_brightness(bl->raw_bd, bl_lvl);
 	case DSI_BACKLIGHT_DCS:
-		rc = dsi_panel_update_backlight(panel, bl_lvl);
+		dsi_panel_set_backlight_asus_logic(panel, bl_lvl);
 		break;
 	case DSI_BACKLIGHT_EXTERNAL:
 		break;
@@ -707,7 +878,40 @@ int dsi_panel_set_backlight(struct dsi_panel *panel, u32 bl_lvl)
 		rc = -ENOTSUPP;
 	}
 
+	if (bl_lvl == 0 && g_last_bl != 0) {
+		printk("[Display] Backlight set 0 to turn off\n");
+		bl_off_to_wait_on = true;
+	}
+
+	if (bl_off_to_wait_on && bl_lvl) {
+		dsi = &panel->mipi_device;
+		printk("[Display] Backlight first set non-zero value to turn on: %d\n", bl_lvl);
+		bl_off_to_wait_on = false;
+
+		if (asus_lcd_cabc_mode[1] == 3)
+			rc = mipi_dsi_dcs_set_display_cabc(dsi);
+	}
+
+	g_last_bl = bl_lvl;
+
+finally:
+	mutex_unlock(&panel->bl_lock);
+
 	return rc;
+}
+
+void dsi_panel_set_backlight_work(struct work_struct *work)
+{
+	struct dsi_panel *panel;
+
+	panel = container_of(work, struct dsi_panel, early_bl_work);
+	if (!panel) {
+		printk("[Display] cannot get panel struct from work\n");
+		return;
+	}
+
+	printk("[Display] try to set early backlight\n");
+	dsi_panel_set_backlight(panel, panel->early_bl_level);
 }
 
 static u32 dsi_panel_get_brightness(struct dsi_backlight_config *bl)
@@ -775,6 +979,7 @@ static int dsi_panel_bl_register(struct dsi_panel *panel)
 		rc = dsi_panel_wled_register(panel, bl);
 		break;
 	case DSI_BACKLIGHT_DCS:
+		rc = dsi_panel_wled_register(panel, bl);
 		break;
 	case DSI_BACKLIGHT_EXTERNAL:
 		break;
@@ -1728,6 +1933,7 @@ error:
 const char *cmd_set_prop_map[DSI_CMD_SET_MAX] = {
 	"qcom,mdss-dsi-pre-on-command",
 	"qcom,mdss-dsi-on-command",
+	"qcom,mdss-dsi-dim-on-command",
 	"qcom,mdss-dsi-post-panel-on-command",
 	"qcom,mdss-dsi-pre-off-command",
 	"qcom,mdss-dsi-off-command",
@@ -1753,6 +1959,7 @@ const char *cmd_set_prop_map[DSI_CMD_SET_MAX] = {
 
 const char *cmd_set_state_map[DSI_CMD_SET_MAX] = {
 	"qcom,mdss-dsi-pre-on-command-state",
+	"qcom,mdss-dsi-on-command-state",
 	"qcom,mdss-dsi-on-command-state",
 	"qcom,mdss-dsi-post-on-command-state",
 	"qcom,mdss-dsi-pre-off-command-state",
@@ -3378,6 +3585,12 @@ struct dsi_panel *dsi_panel_get(struct device *parent,
 	drm_panel_init(&panel->drm_panel);
 	mutex_init(&panel->panel_lock);
 
+	// for early backlight
+	mutex_init(&panel->bl_lock);
+	g_panel = panel;
+	panel->early_bl_workqueue = create_singlethread_workqueue("dsi_early_bl");
+	INIT_WORK(&(panel->early_bl_work), dsi_panel_set_backlight_work);
+
 	return panel;
 error:
 	kfree(panel);
@@ -4249,6 +4462,7 @@ int dsi_panel_post_switch(struct dsi_panel *panel)
 int dsi_panel_enable(struct dsi_panel *panel)
 {
 	int rc = 0;
+	enum dsi_cmd_set_type cmd_type = DSI_CMD_SET_ON;
 
 	if (!panel) {
 		pr_err("Invalid params\n");
@@ -4257,12 +4471,23 @@ int dsi_panel_enable(struct dsi_panel *panel)
 
 	mutex_lock(&panel->panel_lock);
 
-	rc = dsi_panel_tx_cmd_set(panel, DSI_CMD_SET_ON);
-	if (rc)
+	if (asus_lcd_dimming_on) {
+		cmd_type = DSI_CMD_SET_DIM_ON;
+	} else {
+		printk("[Display] using no dimming on-command\n");
+		cmd_type = DSI_CMD_SET_ON;
+	}
+
+	rc = dsi_panel_tx_cmd_set(panel, cmd_type);
+
+	// applying dimming setting here
+	asus_lcd_dim_conf_apply();
+
+	if (rc) {
 		pr_err("[%s] failed to send DSI_CMD_SET_ON cmds, rc=%d\n",
 		       panel->name, rc);
-	else
-		panel->panel_initialized = true;
+	}
+	panel->panel_initialized = true;
 	mutex_unlock(&panel->panel_lock);
 	return rc;
 }

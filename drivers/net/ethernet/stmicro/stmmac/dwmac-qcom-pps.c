@@ -77,6 +77,32 @@ static void align_target_time_reg(u32 ch, void __iomem *ioaddr,
 		       MAC_PPSX_TARGET_TIME_NSEC(eth_pps_cfg->ppsout_ch));
 }
 
+static void align_target_time_reg(u32 ch, void __iomem *ioaddr,
+				  struct pps_cfg *eth_pps_cfg,
+				  unsigned int align_ns)
+{
+	unsigned int system_s, system_ns, temp_system_s;
+
+	system_s = readl_relaxed(ioaddr + 0xb00 + PTP_STSR);
+	system_ns = readl_relaxed(ioaddr + 0xb00 + PTP_STNSR);
+	temp_system_s = readl_relaxed(ioaddr + 0xb00 + PTP_STSR);
+
+	if (temp_system_s != system_s) { // second roll over
+		system_s = readl_relaxed(ioaddr + 0xb00 + PTP_STSR);
+		system_ns = readl_relaxed(ioaddr + 0xb00 + PTP_STNSR);
+	}
+
+	system_ns += PPS_START_DELAY;
+	if (system_ns >= align_ns)
+		system_s += 1;
+
+	writel_relaxed(system_s, ioaddr +
+		       MAC_PPSX_TARGET_TIME_SEC(eth_pps_cfg->ppsout_ch));
+
+	writel_relaxed(align_ns, ioaddr +
+		       MAC_PPSX_TARGET_TIME_NSEC(eth_pps_cfg->ppsout_ch));
+}
+
 static u32 pps_config_sub_second_increment(void __iomem *ioaddr,
 					   u32 ptp_clock, int gmac4)
 {

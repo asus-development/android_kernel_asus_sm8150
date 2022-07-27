@@ -55,6 +55,13 @@ extern "C" {
 		VIRTGPU_EXECBUF_FENCE_FD_OUT |\
 		0)
 
+#define VIRTGPU_EXECBUF_FENCE_FD_IN	0x01
+#define VIRTGPU_EXECBUF_FENCE_FD_OUT	0x02
+#define VIRTGPU_EXECBUF_FLAGS  (\
+		VIRTGPU_EXECBUF_FENCE_FD_IN |\
+		VIRTGPU_EXECBUF_FENCE_FD_OUT |\
+		0)
+
 struct drm_virtgpu_map {
 	__u64 offset; /* use for mmap system call */
 	__u32 handle;

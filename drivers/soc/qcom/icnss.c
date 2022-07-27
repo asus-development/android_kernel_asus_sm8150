@@ -3548,6 +3548,20 @@ static const struct file_operations icnss_regread_fops = {
 	.llseek         = seq_lseek,
 };
 
+
+/* ASUS_BSP+++ for wlan firmware add debug ini */
+static char do_wlan_driver_log_level[256];
+module_param_string(do_wlan_driver_log_level,do_wlan_driver_log_level, sizeof(do_wlan_driver_log_level), S_IWUSR | S_IRUGO);
+MODULE_PARM_DESC(do_wlan_driver_log_level, "wlan driver log level flag");
+
+char * wcnss_get_driver_log_level(void)
+{
+       pr_info("[wcnss]: do_wlan_driver_log_level=%s.\n", do_wlan_driver_log_level);
+       return do_wlan_driver_log_level;
+}
+EXPORT_SYMBOL(wcnss_get_driver_log_level);
+/* ASUS_BSP--- for wlan firmware add debug ini  */
+
 #ifdef CONFIG_ICNSS_DEBUG
 static int icnss_debugfs_create(struct icnss_priv *priv)
 {

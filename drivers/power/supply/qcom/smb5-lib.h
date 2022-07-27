@@ -102,16 +102,31 @@ enum print_reason {
 #define SDP_100_MA			100000
 #define SDP_CURRENT_UA			500000
 #define CDP_CURRENT_UA			1500000
-#define DCP_CURRENT_UA			1500000
+#define DCP_CURRENT_UA			1000000
 #define HVDCP_CURRENT_UA		3000000
 #define TYPEC_DEFAULT_CURRENT_UA	900000
 #define TYPEC_MEDIUM_CURRENT_UA		1500000
-#define TYPEC_HIGH_CURRENT_UA		3000000
+#define TYPEC_HIGH_CURRENT_UA		2000000
 #define DCIN_ICL_MIN_UA			100000
 #define DCIN_ICL_MAX_UA			1500000
 #define DCIN_ICL_STEP_UA		100000
 
 #define ROLE_REVERSAL_DELAY_MS		2000
+
+//[+++]ASUS : Add asus define
+#define ASUS_ICL_VOTER "ASUS_ICL_VOTER"
+#define CHARGER_TAG "[BAT][CHG]"
+#define ERROR_TAG "[ERR]"
+#define AUTO_TAG "[AUTO]"
+#define CHG_DBG(fmt, ...) printk(KERN_INFO CHARGER_TAG " %s: " fmt, __func__, ##__VA_ARGS__)
+#define CHG_DBG_E(fmt, ...)  printk(KERN_ERR CHARGER_TAG ERROR_TAG " %s: " fmt, __func__, ##__VA_ARGS__)
+#define CHG_DBG_AT(fmt, ...)  printk(KERN_WARNING CHARGER_TAG AUTO_TAG " %s: " fmt, __func__, ##__VA_ARGS__)
+#define THERMAL_ALERT_NONE	0
+#define THERMAL_ALERT_NO_AC	1
+#define THERMAL_ALERT_WITH_AC	2
+#define THERMAL_ALERT_CYCLE	60000
+#define ADF_PATH "/ADF/ADF"
+//[---]ASUS : Add asus define
 
 enum smb_mode {
 	PARALLEL_MASTER = 0,
@@ -270,6 +285,10 @@ static const unsigned int smblib_extcon_cable[] = {
 	EXTCON_NONE,
 };
 
+static const unsigned int asus_extcon_cable[] = {
+	EXTCON_NONE,
+};
+
 enum lpd_reason {
 	LPD_NONE,
 	LPD_MOISTURE_DETECTED,
@@ -379,6 +398,7 @@ struct smb_iio {
 	struct iio_channel	*die_temp_chan;
 	struct iio_channel	*skin_temp_chan;
 	struct iio_channel	*smb_temp_chan;
+	struct iio_channel	*asus_adapter_vadc_chan;
 };
 
 struct smb_charger {
@@ -482,6 +502,25 @@ struct smb_charger {
 	struct timer_list	apsd_timer;
 
 	struct charger_param	chg_param;
+		
+	/* asus work */
+	struct delayed_work	asus_chg_flow_work;
+	struct delayed_work	asus_adapter_adc_work;
+	struct delayed_work	asus_min_monitor_work;
+	struct delayed_work	asus_batt_RTC_work;
+	struct delayed_work	asus_set_flow_flag_work;
+	struct delayed_work	asus_usb_thermal_work;
+	struct delayed_work	asus_usb_water_work;
+	struct delayed_work	asus_reverse_charge_work;
+	struct delayed_work	asus_cable_capability_check_work;
+	struct delayed_work	asus_reverse_charge_check_camera;
+	struct delayed_work	asus_enable_inov_work;
+	struct delayed_work	asus_check_probe_work;
+	struct delayed_work	asus_check_vbus_work;
+
+	/* asus variables */
+	bool asus_print_usb_src_change;  //Trim the log of usb_source_change_irq
+
 	/* secondary charger config */
 	bool			sec_pl_present;
 	bool			sec_cp_present;
@@ -590,6 +629,11 @@ struct smb_charger {
 
 	/* extcon for VBUS / ID notification to USB for uUSB */
 	struct extcon_dev	*extcon;
+	/* asus extcon */
+	struct extcon_dev	*thermal_extcon;
+	struct extcon_dev	*water_extcon;
+	struct extcon_dev	*quickchg_extcon;
+	struct extcon_dev	*reversechg_extcon;
 
 	/* battery profile */
 	int			batt_profile_fcc_ua;
@@ -624,6 +668,20 @@ struct smb_charger {
 	bool			dcin_uusb_over_gpio_en;
 	bool			aicl_disable;
 };
+
+//[+++]ASUS : Add gpio control struct
+struct gpio_control {
+	u32 ADC_SW_EN;		//soc_101, init L
+	u32 ADCPWREN_PMI_GP1;	//soc_120, init L
+};
+//[---]ASUS : Add gpio control struct
+
+enum QC_BATT_STATUS {
+	NORMAL = 0,
+	QC,
+	QC_PLUS,
+};
+
 
 int smblib_read(struct smb_charger *chg, u16 addr, u8 *val);
 int smblib_masked_write(struct smb_charger *chg, u16 addr, u8 mask, u8 val);
@@ -770,8 +828,6 @@ int smblib_get_prop_charger_temp(struct smb_charger *chg,
 int smblib_get_prop_die_health(struct smb_charger *chg);
 int smblib_get_prop_smb_health(struct smb_charger *chg);
 int smblib_get_prop_connector_health(struct smb_charger *chg);
-int smblib_get_prop_input_current_max(struct smb_charger *chg,
-				  union power_supply_propval *val);
 int smblib_set_prop_thermal_overheat(struct smb_charger *chg,
 			       int therm_overheat);
 int smblib_get_skin_temp_status(struct smb_charger *chg);
@@ -836,4 +892,7 @@ int smblib_get_qc3_main_icl_offset(struct smb_charger *chg, int *offset_ua);
 
 int smblib_init(struct smb_charger *chg);
 int smblib_deinit(struct smb_charger *chg);
+int ADF_check_status(void);
+void jeita_rule(void);
+void CHG_TYPE_judge(void);
 #endif /* __SMB5_CHARGER_H */

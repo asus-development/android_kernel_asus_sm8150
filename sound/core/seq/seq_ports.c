@@ -553,6 +553,7 @@ static void __delete_and_unsubscribe_port(struct snd_seq_client *client,
 
 	if (!empty)
 		unsubscribe_port(client, port, grp, &subs->info, ack);
+	up_write(&grp->list_mutex);
 }
 
 static void delete_and_unsubscribe_port(struct snd_seq_client *client,

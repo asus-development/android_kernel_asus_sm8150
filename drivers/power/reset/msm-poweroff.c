@@ -65,7 +65,31 @@ static void scm_disable_sdi(void);
  * There is no API from TZ to re-enable the registers.
  * So the SDI cannot be re-enabled when it already by-passed.
  */
-static int download_mode = 1;
+#ifdef FORCE_RAMDUMP_FEATURE
+void set_dload_mode(int on);
+int g_force_ramdump = 0;
+int download_mode = 1;
+static int set_download_mode(char *str)
+{
+	if ( strcmp("y", str) == 0 || strcmp("Y", str) == 0 ) {
+		download_mode = 1;
+		set_dload_mode(download_mode);
+		g_force_ramdump = 1;
+	} else
+		download_mode = 0;
+
+	printk("download mode = %d\n",download_mode);
+	return 0;
+}
+__setup("RDUMP=", set_download_mode);
+#else
+#ifdef ASUS_USER_BUILD
+int download_mode = 0;
+#else
+int download_mode = 1;
+#endif
+#endif //#ifdef FORCE_RAMDUMP_FEATURE
+
 static bool force_warm_reboot;
 
 #ifdef CONFIG_QCOM_DLOAD_MODE
@@ -138,7 +162,7 @@ int scm_set_dload_mode(int arg1, int arg2)
 				&desc);
 }
 
-static void set_dload_mode(int on)
+void set_dload_mode(int on)
 {
 	int ret;
 
@@ -218,6 +242,15 @@ static int dload_set(const char *val, const struct kernel_param *kp)
 
 	return 0;
 }
+/* ASUS BSP +++ */
+void set_QPSTInfo_dloadmode(int mode)
+{
+	download_mode = mode;
+	set_dload_mode(download_mode);
+}
+EXPORT_SYMBOL(set_QPSTInfo_dloadmode);
+/* ASUS BSP --- */
+
 #else
 static void set_dload_mode(int on)
 {
@@ -287,26 +320,40 @@ static void halt_spmi_pmic_arbiter(void)
 
 static void msm_restart_prepare(const char *cmd)
 {
+	ulong *printk_buffer_slot2_addr;
 	bool need_warm_reset = false;
 #ifdef CONFIG_QCOM_DLOAD_MODE
 	/* Write download mode flags if we're panic'ing
 	 * Write download mode flags if restart_mode says so
 	 * Kill download mode if master-kill switch is set
 	 */
-	if (!is_kdump_kernel())
-		set_dload_mode(download_mode &&
+
+	set_dload_mode(download_mode &&
 			(in_panic || restart_mode == RESTART_DLOAD));
 #endif
 
 	if (qpnp_pon_check_hard_reset_stored()) {
 		/* Set warm reset as true when device is in dload mode */
-		if (get_dload_mode() ||
+		if (in_panic || get_dload_mode() ||
 			((cmd != NULL && cmd[0] != '\0') &&
 			!strcmp(cmd, "edl")))
 			need_warm_reset = true;
 	} else {
-		need_warm_reset = (get_dload_mode() ||
+		need_warm_reset = (in_panic || get_dload_mode() ||
 				(cmd != NULL && cmd[0] != '\0'));
+	}
+
+	/* ASUS BSP */
+	if (need_warm_reset) {
+		printk("[ASDF] need_warm_reset=true, in_panic=%d\n", in_panic );
+	} else {
+		printk("[ASDF] need_warm_reset=false, in_panic=%d\n", in_panic );
+	}
+
+	if (!in_panic) {
+		// Normal reboot. Clean the printk buffer magic
+		printk_buffer_slot2_addr = (ulong *)PRINTK_BUFFER_SLOT2;
+		*printk_buffer_slot2_addr = 0;
 	}
 
 	if (force_warm_reboot)
@@ -343,6 +390,10 @@ static void msm_restart_prepare(const char *cmd)
 			qpnp_pon_set_restart_reason(
 				PON_RESTART_REASON_KEYS_CLEAR);
 			__raw_writel(0x7766550a, restart_reason);
+		} else if (!strncmp(cmd, "official-unlock", 15)) {
+			qpnp_pon_set_restart_reason(
+				PON_RESTART_REASON_UNLOCK);
+			__raw_writel(0x6f656d08, restart_reason);
 		} else if (!strncmp(cmd, "oem-", 4)) {
 			unsigned long code;
 			int ret;
@@ -354,8 +405,13 @@ static void msm_restart_prepare(const char *cmd)
 		} else if (!strncmp(cmd, "edl", 3)) {
 			enable_emergency_dload_mode();
 		} else {
+			qpnp_pon_set_restart_reason(PON_RESTART_REASON_KERNEL);
 			__raw_writel(0x77665501, restart_reason);
 		}
+	}
+	if (in_panic) {
+		qpnp_pon_set_restart_reason(PON_RESTART_REASON_PANIC);
+		__raw_writel(0x77665507, restart_reason);
 	}
 
 	flush_cache_all();
@@ -416,7 +472,15 @@ static void do_msm_restart(enum reboot_mode reboot_mode, const char *cmd)
 
 static void do_msm_poweroff(void)
 {
+    ulong *printk_buffer_slot2_addr;
+
 	pr_notice("Powering off the SoC\n");
+    // Normal power off. Clean the printk buffer magic
+    printk_buffer_slot2_addr = (ulong *)PRINTK_BUFFER_SLOT2;
+    *printk_buffer_slot2_addr = 0;
+
+    printk(KERN_CRIT "Clean asus_global...\n");
+    flush_cache_all();
 
 	set_dload_mode(0);
 	scm_disable_sdi();
@@ -690,12 +754,19 @@ skip_sysfs_create:
 	pm_power_off = do_msm_poweroff;
 	arm_pm_restart = do_msm_restart;
 
+#ifdef FORCE_RAMDUMP_FEATURE
+	if(g_force_ramdump) {
+		download_mode = 1;
+		dload_type = SCM_DLOAD_FULLDUMP;
+	}
+#endif
+
 	if (scm_is_call_available(SCM_SVC_PWR, SCM_IO_DISABLE_PMIC_ARBITER) > 0)
 		scm_pmic_arbiter_disable_supported = true;
 
 	if (scm_is_call_available(SCM_SVC_PWR, SCM_IO_DEASSERT_PS_HOLD) > 0)
 		scm_deassert_ps_hold_supported = true;
-	if (!is_kdump_kernel())
+	/*if (!is_kdump_kernel())*/
 		set_dload_mode(download_mode);
 	if (!download_mode)
 		scm_disable_sdi();

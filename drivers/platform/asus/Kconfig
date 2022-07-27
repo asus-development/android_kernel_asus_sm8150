@@ -1,0 +1,18 @@
+# ASUS configuration options
+
+
+config MACH_ASUS_ZF6
+	bool "ZF6 device"
+	help
+		Support for ZF6 products
+
+config ASUS_USER_BUILD
+	bool "ASUS user build"
+	help
+		User build configuration
+
+config ASUS_USERDEBUG_BUILD
+	bool "ASUS userdebug build"
+	help
+		User debug build configuration
+

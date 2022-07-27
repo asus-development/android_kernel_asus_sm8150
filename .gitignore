@@ -21,6 +21,8 @@
 *.gcno
 *.gz
 *.i
+!drivers/input/touchscreen/focaltech_touch_ft8719/include/firmware/*.i
+!drivers/input/touchscreen/focaltech_touch_ft8719/include/pramboot/*.i
 *.ko
 *.ll
 *.lst

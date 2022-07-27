@@ -1296,6 +1296,15 @@ config TOUCHSCREEN_RAYDIUM_CHIPSET
 
 	  If unsure, say N.
 
-source "drivers/input/touchscreen/focaltech_touch/Kconfig"
+#source "drivers/input/touchscreen/focaltech_touch/Kconfig"
+source "drivers/input/touchscreen/focaltech_touch_ft8719/Kconfig"
+
+config TOUCHSCREEN_FTS
+	bool "Focaltech Touchscreens"
+	depends on I2C
+	default n
+	help
+	  Say Y here if you have Focaltech touch panel.
+	  If unsure, say N.
 
 endif

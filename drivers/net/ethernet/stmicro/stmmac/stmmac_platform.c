@@ -392,6 +392,8 @@ stmmac_probe_config_dt(struct platform_device *pdev, const char **mac)
 
 	plat->crc_strip_en = of_property_read_bool(np, "snps,crc_strip");
 
+	plat->crc_strip_en = of_property_read_bool(np, "snps,crc_strip");
+
 	plat->bus_id = of_alias_get_id(np, "ethernet");
 	if (plat->bus_id < 0)
 		plat->bus_id = 0;

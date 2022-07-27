@@ -356,10 +356,12 @@ static int max_ires_curr_ma_table[MAX_IRES_LEVELS] = {
 
 static inline int get_current_reg_code(int target_curr_ma, int ires_ua)
 {
+	int cur_reg_val = 0;
 	if (!ires_ua || !target_curr_ma || (target_curr_ma < (ires_ua / 1000)))
 		return 0;
-
-	return DIV_ROUND_CLOSEST(target_curr_ma * 1000, ires_ua) - 1;
+	cur_reg_val = DIV_ROUND_CLOSEST(target_curr_ma * 1000, ires_ua) * ires_ua > target_curr_ma * 1000 ?
+	    DIV_ROUND_CLOSEST(target_curr_ma * 1000, ires_ua) - 1: DIV_ROUND_CLOSEST(target_curr_ma * 1000, ires_ua);
+	return cur_reg_val;
 }
 
 static int qpnp_flash_led_read(struct qpnp_flash_led *led, u16 addr, u8 *data)

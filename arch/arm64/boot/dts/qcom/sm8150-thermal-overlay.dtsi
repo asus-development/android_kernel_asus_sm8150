@@ -15,6 +15,7 @@
 &thermal_zones {
 	pm8150b_tz {
 		cooling-maps {
+		disable-thermal-zone;
 			trip0_bat {
 				trip = <&pm8150b_trip0>;
 				cooling-device =
@@ -29,9 +30,9 @@
 			};
 		};
 	};
-
 	pm8150_tz {
 		cooling-maps {
+		disable-thermal-zone;
 			trip0_cpu0 {
 				trip = <&pm8150_trip0>;
 				cooling-device =
@@ -127,34 +128,17 @@
 
 	soc {
 		cooling-maps {
-			soc_cpu4 {
-				trip = <&soc_trip>;
-				cooling-device =
-					<&CPU4 THERMAL_MAX_LIMIT
-						THERMAL_MAX_LIMIT>;
-			};
-			soc_cpu5 {
-				trip = <&soc_trip>;
-				cooling-device =
-					<&CPU5 THERMAL_MAX_LIMIT
-						THERMAL_MAX_LIMIT>;
-			};
-			soc_cpu6 {
-				trip = <&soc_trip>;
-				cooling-device =
-					<&CPU6 THERMAL_MAX_LIMIT
-						THERMAL_MAX_LIMIT>;
-			};
 			soc_cpu7 {
 				trip = <&soc_trip>;
 				cooling-device =
-					<&CPU7 THERMAL_MAX_LIMIT
-						THERMAL_MAX_LIMIT>;
+					<&CPU7 (THERMAL_MAX_LIMIT-10)
+						(THERMAL_MAX_LIMIT-10)>;
 			};
 		};
 	};
 
 	pm8150b-bcl-lvl0 {
+		disable-thermal-zone;
 		cooling-maps {
 			vbat_cpu4 {
 				trip = <&b_bcl_lvl0>;
@@ -176,6 +160,7 @@
 	};
 
 	pm8150b-bcl-lvl1 {
+		disable-thermal-zone;
 		cooling-maps {
 			vbat_cpu6 {
 				trip = <&b_bcl_lvl1>;
@@ -197,6 +182,7 @@
 	};
 
 	pm8150b-bcl-lvl2 {
+		disable-thermal-zone;
 		cooling-maps {
 			vbat_gpu2 {
 				trip = <&b_bcl_lvl2>;

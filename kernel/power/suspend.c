@@ -36,6 +36,12 @@
 #include "power.h"
 #include <soc/qcom/boot_stats.h>
 
+//ASUS_BSP +++
+int pm_stay_unattended_period = 0;
+int pmsp_flag = 0;
+extern void asus_uts_print_active_locks(void);
+//ASUS_BSP ---
+
 const char * const pm_labels[] = {
 	[PM_SUSPEND_TO_IDLE] = "freeze",
 	[PM_SUSPEND_STANDBY] = "standby",
@@ -63,6 +69,20 @@ static DECLARE_WAIT_QUEUE_HEAD(s2idle_wait_head);
 
 enum s2idle_states __read_mostly s2idle_state;
 static DEFINE_RAW_SPINLOCK(s2idle_lock);
+
+//ASUS_BSP +++
+DEFINE_TIMER(unattended_timer, unattended_timer_expired, 0, 0);
+
+void unattended_timer_expired(unsigned long data)
+{
+	printk("[PM]unattended_timer_expired\n");
+	ASUSEvtlog("[PM]unattended_timer_expired\n");
+	pm_stay_unattended_period += PM_UNATTENDED_TIMEOUT;
+	pmsp_flag = 1;
+	asus_uts_print_active_locks();
+	mod_timer(&unattended_timer, jiffies + msecs_to_jiffies(PM_UNATTENDED_TIMEOUT));
+}
+//ASUS_BSP ---
 
 void s2idle_set_ops(const struct platform_s2idle_ops *ops)
 {

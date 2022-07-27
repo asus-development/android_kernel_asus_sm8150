@@ -2046,6 +2046,7 @@ static bool manage_workers(struct worker *worker)
  * CONTEXT:
  * spin_lock_irq(pool->lock) which is released and regrabbed.
  */
+static char work_comm[16];
 static void process_one_work(struct worker *worker, struct work_struct *work)
 __releases(&pool->lock)
 __acquires(&pool->lock)
@@ -2090,6 +2091,18 @@ __acquires(&pool->lock)
 	worker->current_func = work->func;
 	worker->current_pwq = pwq;
 	work_color = get_work_color(work);
+
+	/*
+	 * Record wq name for cmdline and debug reporting, may get
+	 * overridden through set_worker_desc().
+	 */
+	strscpy(worker->desc, pwq->wq->name, WORKER_DESC_LEN);
+
+	/* ASUS BSP +++ */
+	memset(work_comm, 0, sizeof(work_comm));
+	snprintf(work_comm, 15, "wk:%pf", work->func);
+	strncpy(current->comm, work_comm, 15);
+	/* ASUS BSP --- */
 
 	list_del_init(&work->entry);
 

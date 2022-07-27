@@ -225,4 +225,8 @@ source "drivers/sensors/Kconfig"
 
 source "drivers/esoc/Kconfig"
 
+source "drivers/exfat/zs630kl/user/Kconfig"
+
+source "drivers/exfat/zs630kl/userdebug/Kconfig"
+
 endmenu

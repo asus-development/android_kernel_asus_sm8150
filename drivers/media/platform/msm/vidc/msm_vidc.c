@@ -521,15 +521,6 @@ int msm_vidc_qbuf(void *instance, struct v4l2_buffer *b)
 		return -EINVAL;
 	}
 
-	q = msm_comm_get_vb2q(inst, b->type);
-	if (!q) {
-		dprintk(VIDC_ERR,
-		"Failed to find buffer queue for type = %d\n", b->type);
-			return -EINVAL;
-	}
-	mutex_lock(&q->lock);
-
-
 	for (i = 0; i < b->length; i++) {
 		b->m.planes[i].m.fd = b->m.planes[i].reserved[0];
 		b->m.planes[i].data_offset = b->m.planes[i].reserved[1];
@@ -554,11 +545,19 @@ int msm_vidc_qbuf(void *instance, struct v4l2_buffer *b)
 	tag_data.output_tag = b->m.planes[0].reserved[6];
 	msm_comm_store_tags(inst, &tag_data);
 
+	q = msm_comm_get_vb2q(inst, b->type);
+	if (!q) {
+		dprintk(VIDC_ERR,
+			"Failed to find buffer queue for type = %d\n", b->type);
+		return -EINVAL;
+	}
+
+	mutex_lock(&q->lock);
 	rc = vb2_qbuf(&q->vb2_bufq, b);
+	mutex_unlock(&q->lock);
 	if (rc)
 		dprintk(VIDC_ERR, "Failed to qbuf, %d\n", rc);
 
-	mutex_unlock(&q->lock);
 	return rc;
 }
 EXPORT_SYMBOL(msm_vidc_qbuf);
