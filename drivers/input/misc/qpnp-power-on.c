@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2019, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2020, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -32,6 +32,24 @@
 #include <linux/regulator/driver.h>
 #include <linux/regulator/machine.h>
 #include <linux/regulator/of_regulator.h>
+#include <linux/qpnp/qpnp-pbs.h>
+#include <linux/qpnp/qpnp-misc.h>
+#include <linux/reboot.h>
+
+#ifdef FORCE_RAMDUMP_FEATURE
+extern int g_force_ramdump;
+#endif
+
+#ifdef CONFIG_PON_EVT_LOG
+extern char evtlog_pon_dump[100];
+#endif
+
+static int power_key_6s_running = 0;
+static int voldown_key_6s_running = 0;
+static int power_key_3s_running = 0;
+static int voldown_key_3s_running = 0;
+static struct work_struct pwr_press_work;
+static struct work_struct volDown_press_work;
 
 #define PMIC_VER_8941				0x01
 #define PMIC_VERSION_REG			0x0105
@@ -64,12 +82,22 @@
 	((pon)->base + PON_OFFSET((pon)->subtype, 0x8, 0xC0))
 #define QPNP_PON_WARM_RESET_REASON1(pon) \
 	((pon)->base + PON_OFFSET((pon)->subtype, 0xA, 0xC2))
+#ifdef CONFIG_PON_EVT_LOG
+#define QPNP_GEN1_PON_ON_REASON(pon) ((pon)->base + 0xC4)
+#define QPNP_GEN1_PON_POFF_REASON1(pon) ((pon)->base + 0xC5)
+#endif
 #define QPNP_POFF_REASON1(pon) \
 	((pon)->base + PON_OFFSET((pon)->subtype, 0xC, 0xC5))
 #define QPNP_PON_WARM_RESET_REASON2(pon)	((pon)->base + 0xB)
 #define QPNP_PON_OFF_REASON(pon)		((pon)->base + 0xC7)
 #define QPNP_FAULT_REASON1(pon)			((pon)->base + 0xC8)
+#ifdef CONFIG_PON_EVT_LOG
+#define QPNP_FAULT_REASON2(pon)			((pon)->base + 0xC9)
+#endif
 #define QPNP_S3_RESET_REASON(pon)		((pon)->base + 0xCA)
+#ifdef CONFIG_PON_EVT_LOG
+#define QPNP_SOFT_RESET_REASON1(pon)		((pon)->base + 0xCB)
+#endif
 #define QPNP_PON_KPDPWR_S1_TIMER(pon)		((pon)->base + 0x40)
 #define QPNP_PON_KPDPWR_S2_TIMER(pon)		((pon)->base + 0x41)
 #define QPNP_PON_KPDPWR_S2_CNTL(pon)		((pon)->base + 0x42)
@@ -210,11 +238,13 @@ struct qpnp_pon {
 	struct mutex		restore_lock;
 	struct delayed_work	bark_work;
 	struct dentry		*debugfs;
+	struct device_node	*pbs_dev_node;
 	u16			base;
 	u8			subtype;
 	u8			pon_ver;
 	u8			warm_reset_reason1;
 	u8			warm_reset_reason2;
+	u8			twm_state;
 	int			num_pon_config;
 	int			num_pon_reg;
 	int			pon_trigger_reason;
@@ -234,8 +264,11 @@ struct qpnp_pon {
 	bool			ps_hold_hard_reset_disable;
 	bool			ps_hold_shutdown_disable;
 	bool			kpdpwr_dbc_enable;
+	bool			support_twm_config;
 	bool			resin_pon_reset;
 	ktime_t			kpdpwr_last_release_time;
+	struct notifier_block	pon_nb;
+	bool			legacy_hard_reset_offset;
 };
 
 static int pon_ship_mode_en;
@@ -251,6 +284,9 @@ static u32 s1_delay[PON_S1_COUNT_MAX + 1] = {
 	0, 32, 56, 80, 138, 184, 272, 408, 608, 904, 1352, 2048, 3072, 4480,
 	6720, 10256
 };
+
+static u32 gresin_irq = 0;
+static bool gresin_irq_enable = false;
 
 static const char * const qpnp_pon_reason[] = {
 	[0] = "Triggered from Hard Reset",
@@ -312,6 +348,21 @@ static const char * const qpnp_poff_reason[] = {
 	[38] = "Triggered from S3_RESET_PBS_NACK",
 	[39] = "Triggered from S3_RESET_KPDPWR_ANDOR_RESIN",
 };
+
+int asus_enable_resin_irq_wake(bool en)
+{
+	if(en && gresin_irq_enable == false) {
+		printk("[d_keypad] enable resin irq\n");
+		enable_irq_wake(gresin_irq);
+		gresin_irq_enable = true;
+	} else if(!en && gresin_irq_enable == true ) {
+		printk("[d_keypad] disable resin irq\n");
+		disable_irq_wake(gresin_irq);
+		gresin_irq_enable = false;
+	}
+
+	return 0;
+}
 
 static int qpnp_pon_store_reg(struct qpnp_pon *pon, u16 addr)
 {
@@ -417,7 +468,7 @@ int qpnp_pon_set_restart_reason(enum pon_restart_reason reason)
 	if (!pon->store_hard_reset_reason)
 		return 0;
 
-	if (is_pon_gen2(pon))
+	if (is_pon_gen2(pon) && !pon->legacy_hard_reset_offset)
 		rc = qpnp_pon_masked_write(pon, QPNP_PON_SOFT_RB_SPARE(pon),
 					   GENMASK(7, 1), (reason << 1));
 	else
@@ -427,6 +478,219 @@ int qpnp_pon_set_restart_reason(enum pon_restart_reason reason)
 	return rc;
 }
 EXPORT_SYMBOL(qpnp_pon_set_restart_reason);
+
+extern unsigned int b_press;
+/* ASUS_BSP + [ASDF]long press power key 6sec,reset device.. ++ */
+static struct qpnp_pon *pon_for_powerkey;
+static bool is_holding_power_key(void)
+{
+	int rc;
+	uint pon_rt_sts;
+	struct qpnp_pon *pon = pon_for_powerkey;
+
+	if (pon_for_powerkey == NULL) {
+		printk("%s: Error:pon_for_powerkey is NULL\n", __func__);
+		return false;
+	}
+	/* check the RT status to get the current status of the line */
+	rc = regmap_read(pon->regmap, QPNP_PON_RT_STS(pon), &pon_rt_sts);
+	if (rc) {
+		dev_err(pon->dev, "Unable to read PON RT status\n");
+		return rc;
+	}
+
+	return pon_rt_sts & 1;
+}
+
+#include <linux/reboot.h>
+#include <asm/uaccess.h>
+#include <linux/fs.h>
+#define DEV_VIBRATOR "/sys/class/timed_output/vibrator/enable"
+void set_vib_enable(int value)
+{
+	char timeout_ms[5];
+	static mm_segment_t oldfs;
+	struct file *fp = NULL;
+	loff_t pos_lsts = 0;
+
+	sprintf(timeout_ms, "%d", value);
+	oldfs = get_fs();
+	set_fs(KERNEL_DS);
+	fp = filp_open(DEV_VIBRATOR, O_RDWR | O_CREAT | O_TRUNC, 0664);
+	if (IS_ERR_OR_NULL(fp)) {
+		printk("ASDF: fail to open vibrator.");
+		return;
+	}
+	if (fp->f_op != NULL && fp->f_op->write != NULL) {
+		pos_lsts = 0;
+		fp->f_op->write(fp, timeout_ms, strlen(timeout_ms), &pos_lsts);
+	} else {
+		printk("ASDF: fail to write value.\n");
+	}
+	filp_close(fp, NULL);
+	set_fs(oldfs);
+	printk("ASDF: set vibrator enable. (%s ms)\n", timeout_ms);
+}
+
+#define TIMEOUT_COUNT 60
+static struct work_struct __wait_for_power_key_6s_work;
+static unsigned long press_time;
+static int slow_ok;
+static unsigned long slowlog_time;
+struct timer_list pwr_press_timer;
+struct timer_list voldown_press_timer;
+static struct work_struct __wait_for_slowlog_work;
+static struct work_struct __slowlog_work;
+
+void wait_for_power_key_6s_work(struct work_struct *work)
+{
+	static int power_key_6s_running = 0;
+	int i, duration;
+	unsigned long timeout, startime;
+
+	if (!power_key_6s_running) {
+		if (!is_holding_power_key())
+			return;
+		power_key_6s_running = 1;
+		startime = slowlog_time;
+		timeout = startime + HZ * TIMEOUT_COUNT / 10;
+		for (i = 0, slow_ok = 0; i < TIMEOUT_COUNT && slow_ok == 0 &&
+		     time_before(jiffies, timeout); i++) {
+			if (is_holding_power_key())
+				msleep(100);
+			else
+				break;
+		}
+
+		if (((i == TIMEOUT_COUNT) || (slow_ok == 1) ||
+		     time_after_eq(jiffies, timeout)) &&
+		    (is_holding_power_key()) && (i > 0)) {
+			duration = (jiffies - startime) * 10 / HZ;
+			ASUSEvtlog("ASDF: reset device after power press %d.%d sec (%d)\n",
+				   duration / 10, duration % 10, i);
+			ASUSEvtlog("[Reboot] Power key long press %d.%d sec\n",
+					duration/10, duration%10);
+			set_vib_enable(200);
+			msleep(200);
+
+			printk("force reset device!!\n");
+			kernel_restart(NULL);
+		}
+
+		power_key_6s_running = 0;
+	}
+}
+/* ASUS_BSP + [ASDF]long press power key 6sec,reset device.. -- */
+
+#define TIMEOUT_SLOW 30
+extern int boot_after_60sec;
+void wait_for_slowlog_work(struct work_struct *work)
+{
+	static int one_slowlog_instance_running = 0;
+	int i, duration;
+	unsigned long timeout, startime;
+
+	if (!one_slowlog_instance_running) {
+		if (!is_holding_power_key())
+			return;
+		one_slowlog_instance_running = 1;
+		startime = press_time;
+		slowlog_time = startime;
+		timeout = startime + HZ * TIMEOUT_SLOW / 10;
+		slow_ok = 0;
+		for (i = 0; i < TIMEOUT_SLOW && time_before(jiffies, timeout);
+		     i++) {
+			if (is_holding_power_key())
+				msleep(100);
+			else
+				break;
+		}
+
+		if (((i == TIMEOUT_SLOW) || time_after_eq(jiffies, timeout)) &&
+		    (is_holding_power_key()) && (i > 0)) {
+			printk("start to gi chk\n");
+			duration = (jiffies - startime) * 10 / HZ;
+			printk("start to gi chk after power press %d.%d sec (%d)\n",
+			       duration / 10, duration % 10, i);
+			save_all_thread_info();
+			save_phone_hang_log(0);
+			msleep(1 * 1000);
+
+			duration = (jiffies - startime) * 10 / HZ;
+			printk("start to gi delta after power press %d.%d sec (%d)\n",
+			       duration / 10, duration % 10, i);
+			delta_all_thread_info();
+			save_phone_hang_log(1);
+			slow_ok = 1;
+
+			get_last_shutdown_log();
+
+#if 0
+			save_rtb_log();
+#endif
+		}
+		one_slowlog_instance_running = 0;
+	}
+}
+
+void slowlog_work(struct work_struct *work)
+{
+	static int one_slowlog_instance_running = 0;
+	int i = 0, duration = 0;
+	unsigned long timeout, startime;
+
+	if (!one_slowlog_instance_running) {
+		if (!is_holding_power_key())
+			return;
+		one_slowlog_instance_running = 1;
+		startime = press_time;
+		slowlog_time = startime;
+		timeout = startime + HZ * TIMEOUT_SLOW / 10;
+		slow_ok = 0;
+
+			printk("start to gi chk\n");
+			duration = (jiffies - startime) * 10 / HZ;
+			printk("start to gi chk after power press %d.%d sec (%d)\n",
+			       duration / 10, duration % 10, i);
+			save_all_thread_info();
+			save_phone_hang_log(0);
+			msleep(1 * 1000);
+
+			duration = (jiffies - startime) * 10 / HZ;
+			printk("start to gi delta after power press %d.%d sec (%d)\n",
+			       duration / 10, duration % 10, i);
+			delta_all_thread_info();
+			save_phone_hang_log(1);
+			slow_ok = 1;
+
+			get_last_shutdown_log();
+
+#if 0
+			save_rtb_log();
+#endif
+
+		one_slowlog_instance_running = 0;
+	}
+}
+
+static struct work_struct __dump_log_work;
+
+#include <linux/kmod.h>
+void dump_log_work(struct work_struct *work)
+{
+	int i = 2;
+
+	char *argv[] = { "/system/bin/dump_log", NULL };
+	char *envp[] = { "HOME=/" , NULL };
+
+	for(; i > 0; i--) {
+		set_vib_enable(500);
+		msleep(1000);
+	}
+
+	call_usermodehelper(argv[0], argv, envp, UMH_WAIT_PROC);
+
+}
 
 /*
  * qpnp_pon_check_hard_reset_stored() - Checks if the PMIC need to
@@ -534,12 +798,26 @@ static ssize_t debounce_us_store(struct device *dev,
 }
 static DEVICE_ATTR_RW(debounce_us);
 
+#define PON_TWM_ENTRY_PBS_BIT           BIT(0)
 static int qpnp_pon_reset_config(struct qpnp_pon *pon,
 				 enum pon_power_off_type type)
 {
 	int rc;
 	bool disable = false;
 	u16 rst_en_reg;
+
+	/* Ignore the PS_HOLD reset config if TWM ENTRY is enabled */
+	if (pon->support_twm_config && pon->twm_state == PMIC_TWM_ENABLE) {
+		rc = qpnp_pbs_trigger_event(pon->pbs_dev_node,
+					PON_TWM_ENTRY_PBS_BIT);
+		if (rc < 0) {
+			pr_err("Unable to trigger PBS trigger for TWM entry rc=%d\n",
+							rc);
+			return rc;
+		}
+		pr_crit("PMIC configured for TWM entry\n");
+		return 0;
+	}
 
 	if (pon->pon_ver == QPNP_PON_GEN1_V1)
 		rst_en_reg = QPNP_PON_PS_HOLD_RST_CTL(pon);
@@ -907,7 +1185,11 @@ static struct qpnp_pon_config *qpnp_get_cfg(struct qpnp_pon *pon, u32 pon_type)
 
 	return NULL;
 }
-
+extern unsigned int vol_up_press;
+unsigned int vol_down_press_count = 0;
+extern void set_dload_mode(int on);
+extern void msm_set_restart_mode(int mode);
+extern int download_mode;
 static int qpnp_pon_input_dispatch(struct qpnp_pon *pon, u32 pon_type)
 {
 	struct qpnp_pon_config *cfg = NULL;
@@ -929,7 +1211,7 @@ static int qpnp_pon_input_dispatch(struct qpnp_pon *pon, u32 pon_type)
 		elapsed_us = ktime_us_delta(ktime_get(),
 				pon->kpdpwr_last_release_time);
 		if (elapsed_us < pon->dbc_time_us) {
-			pr_debug("Ignoring kpdpwr event; within debounce time\n");
+			printk("[keypad] Ignoring kpdpwr event; within debounce time. (elapsed_us=%d, pon->dbc_time_us=%d) \n", elapsed_us, pon->dbc_time_us);
 			return 0;
 		}
 	}
@@ -942,6 +1224,23 @@ static int qpnp_pon_input_dispatch(struct qpnp_pon *pon, u32 pon_type)
 	switch (cfg->pon_type) {
 	case PON_KPDPWR:
 		pon_rt_bit = QPNP_PON_KPDPWR_N_SET;
+
+	/* for phone hang debug */
+		pon_for_powerkey = pon;
+		if (boot_after_60sec) {
+			if (is_holding_power_key()) {
+				press_time = jiffies;
+				mod_timer(&pwr_press_timer, jiffies + msecs_to_jiffies(3000));
+				if(b_press == 3) {
+					schedule_work(&__dump_log_work);
+				}
+			} else {
+				power_key_6s_running = 0;
+				power_key_3s_running = 0;
+				del_timer(&pwr_press_timer);
+				press_time = 0xFFFFFFFF;
+			}
+		}
 		break;
 	case PON_RESIN:
 		pon_rt_bit = QPNP_PON_RESIN_N_SET;
@@ -959,6 +1258,35 @@ static int qpnp_pon_input_dispatch(struct qpnp_pon *pon, u32 pon_type)
 	pr_debug("PMIC input: code=%d, status=0x%02X\n", cfg->key_code,
 		pon_rt_sts);
 	key_status = pon_rt_sts & pon_rt_bit;
+
+	printk("[Keys][qpnp-power-on.c] keycode=%d, state=%s\n",
+			cfg->key_code, key_status?"press":"release");
+
+	if(cfg->key_code == 114) { //volume down
+		if (vol_up_press) {
+			if (key_status > 0)
+				vol_down_press_count++;
+			pr_info("vol_down_press_count = %d\r\n",vol_down_press_count);
+			if (vol_down_press_count == 10) {
+				download_mode = 1;
+				set_dload_mode(download_mode);
+				msm_set_restart_mode(download_mode);
+				panic("special panic...\r\n");
+			}
+		}
+	}
+
+	if (boot_after_60sec) {
+		if (cfg->key_code == 114) {
+			if (key_status)
+				mod_timer(&voldown_press_timer, jiffies + msecs_to_jiffies(3000));
+			else {
+				voldown_key_6s_running = 0;
+				voldown_key_3s_running = 0;
+				del_timer(&voldown_press_timer);
+			}
+		}
+	}
 
 	if (pon->kpdpwr_dbc_enable && cfg->pon_type == PON_KPDPWR) {
 		if (!key_status)
@@ -1324,6 +1652,11 @@ qpnp_pon_request_irqs(struct qpnp_pon *pon, struct qpnp_pon_config *cfg)
 
 	/* Mark the interrupts wakeable if they support linux-key */
 	if (cfg->key_code) {
+	printk("[d_keypad] key_code=%d irq=%d \n",cfg->key_code, cfg->state_irq);
+
+	if(gresin_irq == cfg->state_irq)
+		asus_enable_resin_irq_wake(1);
+	else
 		enable_irq_wake(cfg->state_irq);
 
 		/* Special handling for RESIN due to a hardware bug */
@@ -1377,8 +1710,22 @@ static int qpnp_pon_config_kpdpwr_init(struct qpnp_pon *pon,
 		return cfg->state_irq;
 	}
 
+
+#ifdef FORCE_RAMDUMP_FEATURE
+	if(g_force_ramdump) {
+		printk("qpnp_pon_config_kpdpwr_init: support reset.\n");
+		rc = 0;
+		cfg->support_reset = 1;
+	} else {
+
+		rc = of_property_read_u32(node, "qcom,support-reset",
+				  &cfg->support_reset);
+	}
+#else
 	rc = of_property_read_u32(node, "qcom,support-reset",
 				  &cfg->support_reset);
+#endif
+
 	if (rc) {
 		if (rc != -EINVAL) {
 			dev_err(pon->dev, "Unable to read qcom,support-reset, rc=%d\n",
@@ -1425,6 +1772,9 @@ static int qpnp_pon_config_resin_init(struct qpnp_pon *pon,
 		return cfg->state_irq;
 	}
 
+
+	gresin_irq = cfg->state_irq;
+	printk("[d_keypad] gresin_irq=%d \n",gresin_irq);
 	rc = of_property_read_u32(node, "qcom,support-reset",
 				  &cfg->support_reset);
 	if (rc) {
@@ -1584,6 +1934,20 @@ static int qpnp_pon_config_parse_reset_info(struct qpnp_pon *pon,
 	return 0;
 }
 
+#ifdef FORCE_RAMDUMP_FEATURE
+static int qpnp_pon_config_parse_reset_info_pwr(struct qpnp_pon *pon,
+					    struct qpnp_pon_config *cfg,
+					    struct device_node *node)
+{
+	//cfg->s1_timer = 4480;
+	cfg->s1_timer = 10250;
+	cfg->s2_timer = 10;
+	cfg->s2_type = 1;
+
+	return 0;
+}
+#endif
+
 static int qpnp_pon_config_init(struct qpnp_pon *pon,
 				struct platform_device *pdev)
 {
@@ -1643,7 +2007,15 @@ static int qpnp_pon_config_init(struct qpnp_pon *pon,
 			return -EINVAL;
 		}
 
+#ifdef FORCE_RAMDUMP_FEATURE
+		if(cfg->pon_type == PON_KPDPWR && g_force_ramdump) {
+			rc = qpnp_pon_config_parse_reset_info_pwr(pon, cfg, cfg_node);
+		} else {
+			rc = qpnp_pon_config_parse_reset_info(pon, cfg, cfg_node);
+		}
+#else
 		rc = qpnp_pon_config_parse_reset_info(pon, cfg, cfg_node);
+#endif
 		if (rc)
 			return rc;
 
@@ -2018,6 +2390,37 @@ static int qpnp_pon_read_gen2_pon_off_reason(struct qpnp_pon *pon, u16 *reason,
 	return 0;
 }
 
+static int pon_twm_notifier_cb(struct notifier_block *nb,
+				unsigned long action, void *data)
+{
+	struct qpnp_pon *pon = container_of(nb, struct qpnp_pon, pon_nb);
+
+	if (action != PMIC_TWM_CLEAR &&
+			action != PMIC_TWM_ENABLE) {
+		pr_debug("Unsupported option %lu\n", action);
+		return NOTIFY_OK;
+	}
+
+	pon->twm_state = (u8)action;
+	pr_debug("TWM state = %d\n", pon->twm_state);
+
+	return NOTIFY_OK;
+}
+
+static int pon_register_twm_notifier(struct qpnp_pon *pon)
+{
+	int rc;
+
+	pon->pon_nb.notifier_call = pon_twm_notifier_cb;
+	rc = qpnp_misc_twm_notifier_register(&pon->pon_nb);
+	if (rc < 0)
+		pr_err("Failed to register pon_twm_notifier_cb rc=%d\n", rc);
+
+	return rc;
+}
+
+int ASUSEvt_poweroff_reason = -1;
+EXPORT_SYMBOL(ASUSEvt_poweroff_reason);
 static int qpnp_pon_configure_s3_reset(struct qpnp_pon *pon)
 {
 	struct device *dev = pon->dev;
@@ -2080,7 +2483,112 @@ static int qpnp_pon_configure_s3_reset(struct qpnp_pon *pon)
 
 	return 0;
 }
+//===============================================================
+#ifdef CONFIG_PON_EVT_LOG
 
+static int read_pon_reg_1(struct qpnp_pon *pon,u8 *pon_pon_reason1_8c0, u8 *pon_warm_reset_8c2,u8 *pon_on_reason_8c4,u8 *pon_poff_reason1_8c5)
+{
+	int rc;
+	unsigned int pon_sts = 0;
+	unsigned int buf[2];
+
+	//pon_pon_reason1_8c0
+
+	/* PON reason */
+	rc = qpnp_pon_read(pon, QPNP_PON_REASON1(pon), &pon_sts);
+	if (rc) {
+		dev_err(pon->dev, "Unable to read QPNP_PON_REASON1 reg rc:%d\n", rc);
+		return rc;
+	}
+	*pon_pon_reason1_8c0 = (u8)pon_sts;
+
+	//pon_warm_reset_8c2
+
+	rc = qpnp_pon_read(pon, QPNP_PON_WARM_RESET_REASON1(pon), &pon_sts);
+	if (rc) {
+		dev_err(pon->dev, "Unable to read QPNP_PON_WARM_RESET_REASON1 reg rc:%d\n", rc);
+		return rc;
+	}
+	*pon_warm_reset_8c2 = (u8)pon_sts;
+
+	//pon_on_reason_8c4
+	rc = qpnp_pon_read(pon, QPNP_GEN1_PON_ON_REASON(pon), &pon_sts);
+	if (rc) {
+		dev_err(pon->dev, "Unable to read QPNP_GEN1_PON_ON_REASON reg rc:%d\n", rc);
+		return rc;
+	}
+	*pon_on_reason_8c4 = (u8)pon_sts;
+	//*pon_poff_reason1_8c5 = (u8)(pon_sts>>8);
+
+	//pon_on_reason_8c5
+	rc = regmap_bulk_read(pon->regmap, QPNP_POFF_REASON1(pon), buf, 2);
+	if (rc) {
+		dev_err(pon->dev, "Register read failed, addr=0x%04X, rc=%d\n",
+			QPNP_POFF_REASON1(pon), rc);
+		return rc;
+	}
+	//poff_sts = buf[0] | (buf[1] << 8);
+	*pon_poff_reason1_8c5 = (u8)(buf[0]);
+
+	return 0;
+}
+
+static int read_pon_reg_2(struct qpnp_pon *pon,u8 *pon_off_reason_8c7, u8 *pon_fault_reason1_8c8,u8 *pon_fault_reason2_8c9,u8 *pon_s3_reset_reason_8ca)
+{
+	int rc;
+	unsigned int pon_sts = 0;
+
+
+	//pon_off_reason_8c7
+	rc = qpnp_pon_read(pon, QPNP_PON_OFF_REASON(pon), &pon_sts);
+	if (rc) {
+		dev_err(pon->dev, "Unable to read QPNP_PON_OFF_REASON reg rc:%d\n", rc);
+		return rc;
+	}
+	*pon_off_reason_8c7 = (u8)pon_sts;
+
+	//pon_fault_reason1_8c8 & pon_fault_reason2_8c9
+	rc = qpnp_pon_read(pon, QPNP_FAULT_REASON1(pon), &pon_sts);
+	if (rc) {
+		dev_err(pon->dev, "Unable to read QPNP_FAULT_REASON1 reg rc:%d\n", rc);
+		return rc;
+	}
+	*pon_fault_reason1_8c8 = (u8)pon_sts;
+	*pon_fault_reason2_8c9 = (u8)(pon_sts>>8);
+
+	//pon_s3_reset_reason_8ca
+	rc = qpnp_pon_read(pon, QPNP_S3_RESET_REASON(pon), &pon_sts);
+	if (rc) {
+		dev_err(pon->dev, "Unable to read QPNP_S3_RESET_REASON reg rc:%d\n", rc);
+		return rc;
+	}
+	*pon_s3_reset_reason_8ca = (u8)pon_sts;
+
+
+	return 0;
+}
+
+static int read_pon_reg_3(struct qpnp_pon *pon,u8 *pon_soft_reset_reason1_8cb)
+{
+	int rc;
+	unsigned int pon_sts = 0;
+
+
+	//pon_soft_reset_reason1_8cb
+	rc = qpnp_pon_read(pon, QPNP_SOFT_RESET_REASON1(pon), &pon_sts);
+	if (rc) {
+		dev_err(pon->dev, "Unable to read QPNP_SOFT_RESET_REASON1 reg rc:%d\n", rc);
+		return rc;
+	}
+	*pon_soft_reset_reason1_8cb = (u8)pon_sts;
+
+
+
+	return 0;
+}
+
+#endif
+//===========================================================
 static int qpnp_pon_read_hardware_info(struct qpnp_pon *pon, bool sys_reset)
 {
 	struct device *dev = pon->dev;
@@ -2090,6 +2598,17 @@ static int qpnp_pon_read_hardware_info(struct qpnp_pon *pon, bool sys_reset)
 	unsigned int pon_sts = 0;
 	u16 poff_sts = 0;
 	int rc, index;
+#ifdef CONFIG_PON_EVT_LOG
+	u8 pon_pon_reason1_8c0;
+	u8 pon_warm_reset_8c2;
+	u8 pon_on_reason_8c4;
+	u8 pon_poff_reason1_8c5;
+	u8 pon_off_reason_8c7;
+	u8 pon_fault_reason1_8c8;
+	u8 pon_fault_reason2_8c9;
+	u8 pon_s3_reset_reason_8ca;
+	u8 pon_soft_reset_reason1_8cb;
+#endif
 
 	/* Read PON_PERPH_SUBTYPE register to get PON type */
 	rc = qpnp_pon_read(pon, QPNP_PON_PERPH_SUBTYPE(pon), &reg);
@@ -2167,12 +2686,28 @@ static int qpnp_pon_read_hardware_info(struct qpnp_pon *pon, bool sys_reset)
 	if (index >= ARRAY_SIZE(qpnp_poff_reason) || index < 0) {
 		dev_info(dev, "PMIC@SID%d: Unknown power-off reason\n",
 			 to_spmi_device(dev->parent)->usid);
+		if (to_spmi_device(dev->parent)->usid == 0)
+			 ASUSEvt_poweroff_reason = -1;
 	} else {
 		pon->pon_power_off_reason = index;
 		dev_info(dev, "PMIC@SID%d: Power-off reason: %s\n",
 			 to_spmi_device(dev->parent)->usid,
 			 qpnp_poff_reason[index]);
+		if (to_spmi_device(dev->parent)->usid == 0)
+			 ASUSEvt_poweroff_reason = index;
 	}
+#ifdef CONFIG_PON_EVT_LOG
+	if (to_spmi_device(dev->parent)->usid == 0 ) {
+		read_pon_reg_1(pon,&pon_pon_reason1_8c0,&pon_warm_reset_8c2,&pon_on_reason_8c4,&pon_poff_reason1_8c5);
+		read_pon_reg_2(pon,&pon_off_reason_8c7,&pon_fault_reason1_8c8,&pon_fault_reason2_8c9,&pon_s3_reset_reason_8ca);
+		read_pon_reg_3(pon,&pon_soft_reset_reason1_8cb);
+		snprintf(evtlog_pon_dump, sizeof(evtlog_pon_dump), \
+			"8C0: 0x%x, 8C2: 0x%x, 8C4: 0x%x, 8C5: 0x%x, 8C7: 0x%x, 8C8: 0x%x, 8C9: 0x%x, 8CA: 0x%x, 8CB: 0x%x ", \
+			pon_pon_reason1_8c0,pon_warm_reset_8c2,pon_on_reason_8c4, pon_poff_reason1_8c5, \
+			pon_off_reason_8c7,pon_fault_reason1_8c8,pon_fault_reason2_8c9,pon_s3_reset_reason_8ca, \
+			pon_soft_reset_reason1_8cb);
+	}
+#endif
 
 	if ((pon->pon_trigger_reason == PON_SMPL ||
 		pon->pon_power_off_reason == QPNP_POFF_REASON_UVLO) &&
@@ -2287,6 +2822,22 @@ static int qpnp_pon_probe(struct platform_device *pdev)
 	}
 	pon->base = base;
 
+	if (of_property_read_bool(dev->of_node,
+					"qcom,support-twm-config")) {
+		pon->support_twm_config = true;
+		rc = pon_register_twm_notifier(pon);
+		if (rc < 0) {
+			pr_err("Failed to register TWM notifier rc=%d\n", rc);
+			return rc;
+		}
+		pon->pbs_dev_node = of_parse_phandle(dev->of_node,
+						"qcom,pbs-client", 0);
+		if (!pon->pbs_dev_node) {
+			pr_err("Missing qcom,pbs-client property\n");
+			return -EINVAL;
+		}
+	}
+
 	sys_reset = of_property_read_bool(dev->of_node, "qcom,system-reset");
 	if (sys_reset && sys_reset_dev) {
 		dev_err(dev, "qcom,system-reset property must only be specified for one PMIC PON device in the system\n");
@@ -2351,6 +2902,9 @@ static int qpnp_pon_probe(struct platform_device *pdev)
 	pon->store_hard_reset_reason = of_property_read_bool(dev->of_node,
 					"qcom,store-hard-reset-reason");
 
+	pon->legacy_hard_reset_offset = of_property_read_bool(pdev->dev.of_node,
+					"qcom,use-legacy-hard-reset-offset");
+
 	if (of_property_read_bool(dev->of_node, "qcom,secondary-pon-reset")) {
 		if (sys_reset) {
 			dev_err(dev, "qcom,system-reset property shouldn't be used along with qcom,secondary-pon-reset property\n");
@@ -2378,6 +2932,8 @@ static int qpnp_pon_probe(struct platform_device *pdev)
 		sys_reset_dev = pon;
 
 	qpnp_pon_debugfs_init(pon);
+
+	asus_enable_resin_irq_wake(0);
 
 	return 0;
 }
@@ -2448,6 +3004,7 @@ static int qpnp_pon_freeze(struct device *dev)
 static const struct dev_pm_ops qpnp_pon_pm_ops = {
 	.freeze = qpnp_pon_freeze,
 	.restore = qpnp_pon_restore,
+	.thaw = qpnp_pon_restore,
 };
 #endif
 
@@ -2468,8 +3025,79 @@ static struct platform_driver qpnp_pon_driver = {
 	.remove = qpnp_pon_remove,
 };
 
+void pwr_press_timer_callback(struct timer_list *timer)
+{
+	schedule_work(&pwr_press_work);
+}
+
+void pwr_press_workqueue(struct work_struct *work)
+{
+	
+	if(power_key_3s_running  == 0){
+		power_key_3s_running = 1;
+		if (voldown_key_3s_running ) {
+				schedule_work(&__slowlog_work);	
+		}
+		mod_timer(&pwr_press_timer, jiffies + msecs_to_jiffies(3000));
+	}else {
+		power_key_6s_running= 1;
+		if (voldown_key_6s_running ) {
+				//schedule_work(&__wait_for_slowlog_work);
+				ASUSEvtlog("ASDF: reset device after power press 6 sec \n");
+				ASUSEvtlog("[Reboot] Power key long press 6 sec\n");
+				set_vib_enable(200);
+				msleep(200);
+
+				printk("force reset device!!\n");
+				kernel_restart(NULL);
+		}
+	}
+	
+}
+
+void volDown_press_timer_callback(struct timer_list *timer)
+{
+	schedule_work(&volDown_press_work);
+}
+
+void volDown_press_workqueue(struct work_struct *work)
+{
+	
+	if(voldown_key_3s_running  == 0){
+		voldown_key_3s_running = 1;
+		if (power_key_3s_running ) {
+				schedule_work(&__slowlog_work);	
+		}
+		mod_timer(&voldown_press_timer, jiffies + msecs_to_jiffies(3000));
+	}else {
+		voldown_key_6s_running = 1;
+		if (power_key_6s_running ) {
+				ASUSEvtlog("ASDF: reset device after power press 6 sec \n");
+				ASUSEvtlog("[Reboot] Power key long press 6 sec\n");
+				set_vib_enable(200);
+				msleep(200);
+
+				printk("force reset device!!\n");
+				kernel_restart(NULL);
+		}
+	}
+
+}
+
 static int __init qpnp_pon_init(void)
 {
+	/* ASUS_BSP : [ASDF] long press power key 3sec, to save slow log */
+	INIT_WORK(&__wait_for_slowlog_work, wait_for_slowlog_work);
+	INIT_WORK(&__slowlog_work, slowlog_work);
+	/* ASUS_BSP : [ASDF] long press power key 6sec,reset device */
+	INIT_WORK(&__wait_for_power_key_6s_work, wait_for_power_key_6s_work);
+
+	INIT_WORK(&__dump_log_work, dump_log_work);
+	timer_setup(&pwr_press_timer, pwr_press_timer_callback, 0);
+	timer_setup(&voldown_press_timer, volDown_press_timer_callback, 0);
+	INIT_WORK(&pwr_press_work, pwr_press_workqueue);
+	INIT_WORK(&volDown_press_work, volDown_press_workqueue);
+
 	return platform_driver_register(&qpnp_pon_driver);
 }
 subsys_initcall(qpnp_pon_init);

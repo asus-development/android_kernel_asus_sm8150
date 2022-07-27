@@ -14,6 +14,7 @@
 #define _CAM_SENSOR_CORE_H_
 
 #include "cam_sensor_dev.h"
+int cam_sensor_is_power_up(void);
 
 /**
  * @s_ctrl: Sensor ctrl structure

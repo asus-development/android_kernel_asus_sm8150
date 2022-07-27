@@ -176,9 +176,11 @@ int cnss_request_bus_bandwidth(struct device *dev, int bandwidth)
 
 	switch (bandwidth) {
 	case CNSS_BUS_WIDTH_NONE:
+	case CNSS_BUS_WIDTH_IDLE:
 	case CNSS_BUS_WIDTH_LOW:
 	case CNSS_BUS_WIDTH_MEDIUM:
 	case CNSS_BUS_WIDTH_HIGH:
+	case CNSS_BUS_WIDTH_VERY_HIGH:
 		ret = msm_bus_scale_client_update_request(
 			bus_bw_info->bus_client, bandwidth);
 		if (!ret)
@@ -697,6 +699,11 @@ int cnss_idle_shutdown(struct device *dev)
 		return -ENODEV;
 	}
 
+	if (test_bit(CNSS_IN_SUSPEND_RESUME, &plat_priv->driver_state)) {
+		cnss_pr_dbg("System suspend or resume in progress, ignore idle shutdown\n");
+		return -EAGAIN;
+	}
+
 	cnss_pr_dbg("Doing idle shutdown\n");
 
 	if (!test_bit(CNSS_DRIVER_RECOVERY, &plat_priv->driver_state) &&
@@ -1149,11 +1156,6 @@ static int cnss_wlfw_server_arrive_hdlr(struct cnss_plat_data *plat_priv,
 	int ret;
 	unsigned int bdf_type;
 
-	if (test_bit(CNSS_DRIVER_UNLOADING, &plat_priv->driver_state)) {
-		cnss_pr_info("Unloading is in progress, ignore server arrive\n");
-		return 0;
-	}
-
 	ret = cnss_wlfw_server_arrive(plat_priv, data);
 	if (ret)
 		goto out;
@@ -1375,7 +1377,7 @@ static int cnss_qdss_trace_save_hdlr(struct cnss_plat_data *plat_priv,
 			va = cnss_qdss_trace_pa_to_va(plat_priv, pa,
 						      size, &seg_id);
 			if (!va) {
-				cnss_pr_err("Fail to find matching va for pa %pa\n",
+				cnss_pr_err("Fail to find matching va for pa 0x%llx\n",
 					    pa);
 				ret = -EINVAL;
 				break;

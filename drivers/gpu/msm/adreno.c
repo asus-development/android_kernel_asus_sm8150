@@ -19,6 +19,7 @@
 #include <linux/input.h>
 #include <linux/io.h>
 #include <soc/qcom/scm.h>
+#include <soc/qcom/boot_stats.h>
 
 #include <linux/msm-bus-board.h>
 #include <linux/msm-bus.h>
@@ -1335,6 +1336,8 @@ static int adreno_probe(struct platform_device *pdev)
 	struct adreno_device *adreno_dev;
 	int status;
 
+	place_marker("M - DRIVER GPU Init");
+
 	adreno_dev = adreno_get_dev(pdev);
 
 	if (adreno_dev == NULL) {
@@ -1479,6 +1482,8 @@ static int adreno_probe(struct platform_device *pdev)
 		}
 	}
 #endif
+
+	place_marker("M - DRIVER GPU Ready");
 out:
 	if (status) {
 		adreno_ringbuffer_close(adreno_dev);
@@ -1692,6 +1697,8 @@ static int adreno_init(struct kgsl_device *device)
 	if (test_bit(ADRENO_DEVICE_INITIALIZED, &adreno_dev->priv))
 		return 0;
 
+	place_marker("M - DRIVER ADRENO Init");
+
 	/*
 	 * Either the microcode read failed because the usermodehelper isn't
 	 * available or the microcode was corrupted. Fail the init and force
@@ -1764,6 +1771,8 @@ static int adreno_init(struct kgsl_device *device)
 		}
 
 	}
+
+	place_marker("M - DRIVER ADRENO Ready");
 
 	return 0;
 }
@@ -2800,6 +2809,32 @@ static int adreno_getproperty(struct kgsl_device *device,
 
 		if (copy_to_user(value, &gaming_bin,
 					sizeof(unsigned int))) {
+			status = -EFAULT;
+			break;
+		}
+		status = 0;
+	}
+	break;
+
+	case KGSL_PROP_MACROTILING_CHANNELS:
+	{
+		unsigned int channel;
+
+		if (sizebytes < sizeof(unsigned int)) {
+			status = -EINVAL;
+			break;
+		}
+
+		if (of_property_read_u32(device->pdev->dev.of_node,
+			"qcom,macrotiling-channels", &channel)) {
+			/* return error when not set in device tree
+			 * and let user decide.
+			 */
+			status = -EINVAL;
+			break;
+		}
+
+		if (copy_to_user(value, &channel, sizeof(channel))) {
 			status = -EFAULT;
 			break;
 		}
@@ -4245,7 +4280,7 @@ static struct platform_driver kgsl_bus_platform_driver = {
 	}
 };
 
-static int __init kgsl_3d_init(void)
+static int __kgsl_3d_init(void *arg)
 {
 	int ret;
 
@@ -4258,6 +4293,21 @@ static int __init kgsl_3d_init(void)
 		platform_driver_unregister(&kgsl_bus_platform_driver);
 
 	return ret;
+}
+
+static int __init kgsl_3d_init(void)
+{
+#ifdef CONFIG_PLATFORM_AUTO
+	struct task_struct *kgsl_3d_init_task =
+		kthread_run(__kgsl_3d_init, NULL, "kgsl_3d_init");
+	if (IS_ERR(kgsl_3d_init_task))
+		return PTR_ERR(kgsl_3d_init_task);
+	else
+		return 0;
+#else
+	__kgsl_3d_init(NULL);
+	return 0;
+#endif
 }
 
 static void __exit kgsl_3d_exit(void)

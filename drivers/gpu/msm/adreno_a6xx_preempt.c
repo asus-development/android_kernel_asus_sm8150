@@ -36,6 +36,7 @@ static void _update_wptr(struct adreno_device *adreno_dev, bool reset_timer)
 	struct adreno_ringbuffer *rb = adreno_dev->cur_rb;
 	unsigned long flags;
 	int ret = 0;
+	struct kgsl_device *device = KGSL_DEVICE(adreno_dev);
 
 	spin_lock_irqsave(&rb->preempt_lock, flags);
 
@@ -45,10 +46,29 @@ static void _update_wptr(struct adreno_device *adreno_dev, bool reset_timer)
 		 * dispatcher context. Do it now.
 		 */
 		if (rb->skip_inline_wptr) {
+			/*
+			 * There could be a situation where GPU comes out of
+			 * ifpc after a fenced write transaction but before
+			 * reading AHB_FENCE_STATUS from KMD, it goes back to
+			 * ifpc due to inactivity (kernel scheduler plays a
+			 * role here). Thus, the GPU could technically be
+			 * re-collapsed between subsequent register writes
+			 * leading to a prolonged preemption sequence. The
+			 * keepalive bit prevents any further power collapse
+			 * while it is set.
+			 */
+			if (gmu_core_isenabled(device))
+				gmu_core_regrmw(device, A6XX_GMU_AO_SPARE_CNTL,
+					0x0, 0x2);
 
 			ret = adreno_gmu_fenced_write(adreno_dev,
 				ADRENO_REG_CP_RB_WPTR, rb->wptr,
 				FENCE_STATUS_WRITEDROPPED0_MASK);
+
+			/* Clear the keep alive */
+			if (gmu_core_isenabled(device))
+				gmu_core_regrmw(device, A6XX_GMU_AO_SPARE_CNTL,
+					0x2, 0x0);
 
 			reset_timer = true;
 			rb->skip_inline_wptr = false;
@@ -403,7 +423,8 @@ err:
 	adreno_set_gpu_fault(adreno_dev, ADRENO_GMU_FAULT);
 	adreno_dispatcher_schedule(device);
 	/* Clear the keep alive */
-	gmu_core_regrmw(device, A6XX_GMU_AO_SPARE_CNTL, 0x2, 0x0);
+	if (gmu_core_gpmu_isenabled(device))
+		gmu_core_regrmw(device, A6XX_GMU_AO_SPARE_CNTL, 0x2, 0x0);
 }
 
 void a6xx_preemption_callback(struct adreno_device *adreno_dev, int bit)
@@ -615,14 +636,23 @@ static int a6xx_preemption_ringbuffer_init(struct adreno_device *adreno_dev,
 	struct kgsl_device *device = KGSL_DEVICE(adreno_dev);
 	int ret;
 
+	/*
+	 * Reserve CP context record size as
+	 * GMEM size + GPU HW state size i.e 0x110000
+	 */
 	ret = kgsl_allocate_global(device, &rb->preemption_desc,
-		A6XX_CP_CTXRECORD_SIZE_IN_BYTES, 0, KGSL_MEMDESC_PRIVILEGED,
+		adreno_dev->gpucore->gmem_size + 0x110000,
+		0, KGSL_MEMDESC_PRIVILEGED,
 		"preemption_desc");
 	if (ret)
 		return ret;
 
+	/*
+	 * Reserve CP context record size as
+	 * GMEM size + GPU HW state size i.e 0x110000
+	 */
 	ret = kgsl_allocate_user(device, &rb->secure_preemption_desc,
-		A6XX_CP_CTXRECORD_SIZE_IN_BYTES,
+		adreno_dev->gpucore->gmem_size + 0x110000,
 		KGSL_MEMFLAGS_SECURE | KGSL_MEMDESC_PRIVILEGED);
 	if (ret)
 		return ret;

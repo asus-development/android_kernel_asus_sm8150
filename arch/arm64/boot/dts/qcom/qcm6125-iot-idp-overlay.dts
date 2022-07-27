@@ -15,7 +15,6 @@
 /plugin/;
 
 #include "qcm6125-iot-idp.dtsi"
-#include "trinket-audio-overlay.dtsi"
 
 / {
 	model = "Qualcomm Technologies, Inc. QCM6125 IOT IDP Overlay";

@@ -96,10 +96,11 @@
 #include <asm/cacheflush.h>
 #include <soc/qcom/boot_stats.h>
 
+#include "do_mounts.h"
+
 static int kernel_init(void *);
 
 extern void init_IRQ(void);
-extern void fork_init(void);
 extern void radix_tree_init(void);
 
 /*
@@ -136,12 +137,287 @@ static char *initcall_command_line;
 static char *execute_command;
 static char *ramdisk_execute_command;
 
+int g_ftm_mode = 0;
+EXPORT_SYMBOL(g_ftm_mode);
+
+static int set_ftm_mode(char *str)
+{
+    if ( strcmp("1", str) == 0 )
+    {
+        g_ftm_mode = 1;
+    }
+    else
+    {
+        g_ftm_mode = 0;
+    }
+    printk("androidboot.pre-ftm= %d\n",  g_ftm_mode);
+    return 0;
+}
+__setup("androidboot.pre-ftm=", set_ftm_mode);
+
+// ASUS_BSP +++ Add for asus debug
+int g_user_dbg_mode = 1;
+EXPORT_SYMBOL(g_user_dbg_mode);
+
+static int set_user_dbg_mode(char *str)
+{
+       if (strcmp("y", str) == 0)
+               g_user_dbg_mode = 1;
+       else
+               g_user_dbg_mode = 0;
+       g_user_dbg_mode = 1;
+       printk("Kernel dbg mode = %d\n", g_user_dbg_mode);
+       return 0;
+}
+__setup("dbg=", set_user_dbg_mode);
+// ASUS_BSP --- Add for asus debug
+
+// ASUS_BSP +++ get permissive status
+int permissive_enable = 0;
+EXPORT_SYMBOL(permissive_enable);
+static int get_permissive_status(char *str)
+{
+	
+	if( strcmp("permissive", str) == 0 )
+	{
+		permissive_enable = 1;
+		printk("permissive = %d\n", permissive_enable);
+	}
+
+	return 0;
+}
+__setup("androidboot.selinux=", get_permissive_status);
+// ASUS_BSP --- get permissive status
+
+//[+++]ASUS : Add for kernel charger mode
+bool g_Charger_mode = false;
+static int set_charger_mode(char *str)
+{
+    if ( strcmp("charger", str) == 0 )
+        g_Charger_mode = true;
+    else
+        g_Charger_mode = false;
+
+    printk("g_Charger_mode = %d\n", g_Charger_mode);
+    return 0;
+}
+__setup("androidboot.mode=", set_charger_mode);
+EXPORT_SYMBOL(g_Charger_mode);
+//[---]ASUS : Add for kernel charger mode
+
 /*
  * Used to generate warnings if static_key manipulation functions are used
  * before jump_label_init is called.
  */
 bool static_key_initialized __read_mostly;
 EXPORT_SYMBOL_GPL(static_key_initialized);
+
+enum DEVICE_HWID g_ASUS_hwID = HW_REV_INVALID;
+EXPORT_SYMBOL(g_ASUS_hwID);
+static int set_hardware_id(char *str)
+{
+        // ZS630KL
+        if ( strcmp("0", str) == 0 )
+        {
+                g_ASUS_hwID = HW_REV_PR2;
+                printk("Kernel HW ID = ZS630KL_PR2\n");
+        }
+        else if ( strcmp("1", str) == 0 )
+        {
+                g_ASUS_hwID = HW_REV_EVB2;
+                printk("Kernel HW ID = ZS630KL_EVB2\n");
+        }
+        else if ( strcmp("2", str) == 0 )
+        {
+                g_ASUS_hwID = HW_REV_EVB3;
+                printk("Kernel HW ID = ZS630KL_EVB3\n");
+        }
+        else if ( strcmp("3", str) == 0 )
+        {
+                g_ASUS_hwID = HW_REV_SR;
+                printk("Kernel HW ID = ZS630KL_SR\n");
+        }
+        else if ( strcmp("4", str) == 0 )
+        {
+                g_ASUS_hwID = HW_REV_SR2;
+                printk("Kernel HW ID = ZS630KL_SR2\n");
+        }
+        else if ( strcmp("5", str) == 0 )
+        {
+                g_ASUS_hwID = HW_REV_ER;
+                printk("Kernel HW ID = ZS630KL_ER\n");
+        }
+        else if ( strcmp("6", str) == 0 )
+        {
+                g_ASUS_hwID = HW_REV_PR;
+                printk("Kernel HW ID = ZS630KL_PR\n");
+        }
+        else if ( strcmp("7", str) == 0 )
+        {
+                g_ASUS_hwID = HW_REV_MP;
+                printk("Kernel HW ID = ZS630KL_MP\n");
+        }
+
+        printk("g_Asus_hwID = %d\n", g_ASUS_hwID);
+        return 0;
+}
+__setup("androidboot.id.stage=", set_hardware_id);
+
+enum DEVICE_PROJID g_ASUS_prjID = PROJECT_INVALID;
+EXPORT_SYMBOL(g_ASUS_prjID);
+static int set_project_id(char *str)
+{
+        // ZS630KL
+        if ( strcmp("7", str) == 0 )
+        {
+                g_ASUS_prjID = PROJECT_KIRIN;
+                printk("Kernel PROJECT ID = ZS630KL\n");
+        }
+
+        printk("g_Asus_prjID = %d\n", g_ASUS_prjID);
+        return 0;
+}
+__setup("androidboot.id.prj=", set_project_id);
+
+enum DEVICE_SKUID g_ASUS_skuID = SKU_ID_INVALID;
+EXPORT_SYMBOL(g_ASUS_skuID);
+static int set_sku_id(char *str)
+{
+        // ZS630KL
+        if ( strcmp("0", str) == 0 )
+        {
+                g_ASUS_skuID = SKU_ID_0;
+                printk("Kernel SKU ID = 0 (SKU1)\n");
+        }
+        else if ( strcmp("1", str) == 0 )
+        {
+                g_ASUS_skuID = SKU_ID_1;
+                printk("Kernel SKU ID = 1 (SKU2)\n");
+        }
+        else if ( strcmp("2", str) == 0 )
+        {
+                g_ASUS_skuID = SKU_ID_2;
+                printk("Kernel SKU ID = 2 (SKU3)\n");
+        }
+        else if ( strcmp("3", str) == 0 )
+        {
+                g_ASUS_skuID = SKU_ID_3;
+                printk("Kernel SKU ID = 3 (SKU4)\n");
+        }
+        else if ( strcmp("4", str) == 0 )
+        {
+                g_ASUS_skuID = SKU_ID_4;
+                printk("Kernel SKU ID = 4 (SKU5)\n");
+        }
+        else if ( strcmp("5", str) == 0 )
+        {
+                g_ASUS_skuID = SKU_ID_5;
+                printk("Kernel SKU ID = 5 (SKU6)\n");
+        }
+        else if ( strcmp("6", str) == 0 )
+        {
+                g_ASUS_skuID = SKU_ID_6;
+                printk("Kernel SKU ID = 6 (SKU7)\n");
+        }
+        else if ( strcmp("7", str) == 0 )
+        {
+                g_ASUS_skuID = SKU_ID_7;
+                printk("Kernel SKU ID = 7 (SKU8)\n");
+        }
+
+        printk("g_Asus_skuID = %d\n", g_ASUS_skuID);
+        return 0;
+}
+__setup("androidboot.id.sku=", set_sku_id);
+
+enum DEVICE_RFSKU g_ASUS_rfSKU = RF_SKU_UNKNOWN;
+EXPORT_SYMBOL(g_ASUS_rfSKU);
+static int set_rf_id(char *str)
+{
+        // ZS630KL
+        if ( strcmp("5", str) == 0 )
+        {
+                g_ASUS_rfSKU = NA_SKU;
+                printk("Kernel RF SKU= NA SKU\n");
+        }
+        else if ( strcmp("6", str) == 0 )
+        {
+                g_ASUS_rfSKU = WW_SKU;
+                printk("Kernel RF SKU = WW SKU\n");
+        }
+        else if ( strcmp("7", str) == 0 )
+        {
+                g_ASUS_rfSKU = TW_SKU;
+                printk("Kernel RF SKU = TW SKU\n");
+        }
+
+        printk("g_Asus_rfSKU = %d\n", g_ASUS_rfSKU);
+        return 0;
+}
+__setup("androidboot.id.rf=", set_rf_id);
+
+enum DEVICE_LCMID g_ASUS_lcmID = LCM_VENDOR_INVALID;
+EXPORT_SYMBOL(g_ASUS_lcmID);
+static int set_lcm_id(char *str)
+{
+        // ZS630KL
+        if ( strcmp("0", str) == 0 )
+        {
+                g_ASUS_lcmID = LCM_VENDOR1;
+                printk("Kernel LCM VENDOR = VENDOR1\n");
+        }
+        else if ( strcmp("1", str) == 0 )
+        {
+                g_ASUS_lcmID = LCM_VENDOR2;
+                printk("Kernel LCM VENDOR = VENDOR2\n");
+        }
+
+        printk("g_Asus_lcmID = %d\n", g_ASUS_lcmID);
+        return 0;
+}
+__setup("androidboot.id.lcm=", set_lcm_id);
+
+enum DEVICE_NFCID g_ASUS_nfcID = NFC_VENDOR_INVALID;
+EXPORT_SYMBOL(g_ASUS_nfcID);
+static int set_nfc_id(char *str)
+{
+        // ZS630KL
+        if ( strcmp("0", str) == 0 )
+        {
+                g_ASUS_nfcID = NFC_NOT_SUPPORT;
+                printk("Kernel NFC not support\n");
+        }
+        else if ( strcmp("1", str) == 0 )
+        {
+                g_ASUS_nfcID = NFC_SUPPORT;
+                printk("Kernel NFC support\n");
+        }
+
+        printk("g_Asus_nfcID = %d\n", g_ASUS_nfcID);
+        return 0;
+}
+__setup("androidboot.id.nfc=", set_nfc_id);
+
+enum DEVICE_FPID g_ASUS_fpID = FP_VENDOR_INVALID;
+EXPORT_SYMBOL(g_ASUS_fpID);
+static int set_fp_id(char *str)
+{
+        // ZS630KL
+        if ( strcmp("0", str) == 0 )
+        {
+                g_ASUS_fpID = FP_VENDOR1;
+                printk("Kernel FP VENDOR = VENDOR1\n");
+        }
+        else if ( strcmp("1", str) == 0 )
+        {
+                g_ASUS_fpID = FP_VENDOR2;
+                printk("Kernel FP VENDOR = VENDOR2\n");
+        }
+
+        printk("g_Asus_fpID = %d\n", g_ASUS_fpID);
+        return 0;
+}
+__setup("androidboot.id.fp=", set_fp_id);
 
 /*
  * If set, this is an indication to the drivers that reset the underlying
@@ -162,6 +438,24 @@ static int __init set_reset_devices(char *str)
 }
 
 __setup("reset_devices", set_reset_devices);
+
+char evtlog_bootup_reason[50];
+EXPORT_SYMBOL(evtlog_bootup_reason);
+#ifdef FORCE_WD_RESET_FEATURE
+int g_watchdog_reboot = 0;
+EXPORT_SYMBOL(g_watchdog_reboot);
+#endif
+static int set_ASUSEvt_pon_reason(char *str)
+{
+	strcpy(evtlog_bootup_reason, str);
+#ifdef FORCE_WD_RESET_FEATURE
+	if (strstr(str,"abnormal") != NULL) {
+		g_watchdog_reboot = 1;
+	}
+#endif
+	return 0;
+}
+__setup("androidboot.bootreason=", set_ASUSEvt_pon_reason);
 
 static const char *argv_init[MAX_INIT_ARGS+2] = { "init", NULL, };
 const char *envp_init[MAX_INIT_ENVS+2] = { "HOME=/", "TERM=linux", NULL, };
@@ -490,6 +784,29 @@ void __init __weak thread_stack_cache_init(void)
 
 void __init __weak mem_encrypt_init(void) { }
 
+/* Report memory auto-initialization states for this boot. */
+static void __init report_meminit(void)
+{
+	const char *stack;
+
+	if (IS_ENABLED(CONFIG_INIT_STACK_ALL))
+		stack = "all";
+	else if (IS_ENABLED(CONFIG_GCC_PLUGIN_STRUCTLEAK_BYREF_ALL))
+		stack = "byref_all";
+	else if (IS_ENABLED(CONFIG_GCC_PLUGIN_STRUCTLEAK_BYREF))
+		stack = "byref";
+	else if (IS_ENABLED(CONFIG_GCC_PLUGIN_STRUCTLEAK_USER))
+		stack = "__user";
+	else
+		stack = "off";
+
+	pr_info("mem auto-init: stack:%s, heap alloc:%s, heap free:%s\n",
+		stack, want_init_on_alloc(GFP_KERNEL) ? "on" : "off",
+		want_init_on_free() ? "on" : "off");
+	if (want_init_on_free())
+		pr_info("mem auto-init: clearing system memory may take some time...\n");
+}
+
 /*
  * Set up kernel memory allocators
  */
@@ -500,6 +817,7 @@ static void __init mm_init(void)
 	 * bigger than MAX_ORDER unless SPARSEMEM.
 	 */
 	page_ext_init_flatmem();
+	report_meminit();
 	mem_init();
 	kmem_cache_init();
 	pgtable_init();
@@ -551,6 +869,8 @@ asmlinkage __visible void __init start_kernel(void)
 	page_alloc_init();
 
 	pr_notice("Kernel command line: %s\n", boot_command_line);
+	/* parameters may set static keys */
+	jump_label_init();
 	parse_early_param();
 	after_dashes = parse_args("Booting kernel",
 				  static_command_line, __start___param,
@@ -559,8 +879,6 @@ asmlinkage __visible void __init start_kernel(void)
 	if (!IS_ERR_OR_NULL(after_dashes))
 		parse_args("Setting init args", after_dashes, NULL, 0, -1, -1,
 			   NULL, set_init_arg);
-
-	jump_label_init();
 
 	/*
 	 * These use large bootmem allocations and must precede
@@ -996,7 +1314,9 @@ static inline void mark_readonly(void)
 static int __ref kernel_init(void *unused)
 {
 	int ret;
-
+#ifdef CONFIG_EARLY_SERVICES
+	int status = get_early_services_status();
+#endif
 	kernel_init_freeable();
 	/* need to finish all async __init code before freeing the memory */
 	async_synchronize_full();
@@ -1009,6 +1329,14 @@ static int __ref kernel_init(void *unused)
 	rcu_end_inkernel_boot();
 	place_marker("M - DRIVER Kernel Boot Done");
 
+#ifdef CONFIG_EARLY_SERVICES
+	if (status) {
+		struct kstat stat;
+		/* Wait for early services SE policy load completion signal */
+		while (vfs_stat("/dev/sedone", &stat) != 0)
+			;
+	}
+#endif
 	if (ramdisk_execute_command) {
 		ret = run_init_process(ramdisk_execute_command);
 		if (!ret)
@@ -1093,6 +1421,7 @@ static noinline void __init kernel_init_freeable(void)
 		ramdisk_execute_command = NULL;
 		prepare_namespace();
 	}
+	launch_early_services();
 
 	/*
 	 * Ok, we have completed the initial bootup, and

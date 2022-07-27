@@ -228,7 +228,7 @@ static void __cam_isp_ctx_dump_state_monitor_array(
 	ctx_monitor = ctx_isp->cam_isp_ctx_state_monitor;
 
 	if (log_rate_limit)
-		CAM_DBG(CAM_ISP,
+		CAM_INFO_RATE_LIMIT_CUSTOM(CAM_ISP, 5, 20,
 			"Dumping state information for preceding requests");
 	else
 		CAM_INFO(CAM_ISP,
@@ -241,7 +241,7 @@ static void __cam_isp_ctx_dump_state_monitor_array(
 			CAM_ISP_CTX_STATE_MONITOR_MAX_ENTRIES);
 
 		if (log_rate_limit) {
-			CAM_DBG(CAM_ISP,
+			CAM_INFO_RATE_LIMIT_CUSTOM(CAM_ISP, 5, 20,
 			"time[%lld] last reported req_id[%u] frame id[%lld] applied id[%lld] current state[%s] next state[%s] hw_event[%s]",
 			ctx_monitor[index].evt_time_stamp,
 			ctx_monitor[index].last_reported_id,
@@ -338,6 +338,23 @@ put:
 					req_isp->cfg[i].handle);
 		}
 	}
+}
+
+static void __cam_isp_ctx_dequeue_request(struct cam_context *ctx,
+	struct cam_ctx_request *req)
+{
+	struct cam_ctx_request           *req_current;
+	struct cam_ctx_request           *req_prev;
+
+	spin_lock_bh(&ctx->lock);
+	list_for_each_entry_safe_reverse(req_current, req_prev,
+		&ctx->pending_req_list, list) {
+		if (req->request_id == req_current->request_id) {
+			list_del_init(&req_current->list);
+			break;
+		}
+	}
+	spin_unlock_bh(&ctx->lock);
 }
 
 static int __cam_isp_ctx_enqueue_request_in_order(
@@ -1466,7 +1483,7 @@ static int __cam_isp_ctx_handle_error(struct cam_isp_context *ctx_isp,
 	struct cam_isp_ctx_req          *req_isp = NULL;
 	struct cam_isp_ctx_req          *req_isp_to_report = NULL;
 	struct cam_req_mgr_error_notify  notify;
-	uint64_t                         error_request_id;
+	uint64_t                         error_request_id = 0;
 	struct cam_hw_fence_map_entry   *fence_map_out = NULL;
 	struct cam_req_mgr_message       req_msg;
 
@@ -2130,7 +2147,7 @@ static int __cam_isp_ctx_apply_req_in_activated_state(
 		req->request_id, ctx_isp->substate_activated, ctx->ctx_id);
 	req_isp = (struct cam_isp_ctx_req *) req->req_priv;
 
-	if (ctx_isp->active_req_cnt >=  2) {
+	if (ctx_isp->active_req_cnt >=  4) {
 		CAM_ERR_RATE_LIMIT(CAM_ISP,
 			"Reject apply request (id %lld) due to congestion(cnt = %d) ctx %u",
 			req->request_id,
@@ -3345,7 +3362,7 @@ static int __cam_isp_ctx_config_dev_in_top_state(
 		CAM_INFO(CAM_ISP,
 			"request %lld has been flushed, reject packet",
 			packet->header.request_id);
-		rc = -EBADR;
+		rc = -EINVAL;
 		goto free_cpu_buf;
 	}
 
@@ -3416,13 +3433,12 @@ static int __cam_isp_ctx_config_dev_in_top_state(
 			add_req.dev_hdl  = ctx->dev_hdl;
 			add_req.req_id   = req->request_id;
 			add_req.skip_before_applying = 0;
+			__cam_isp_ctx_enqueue_request_in_order(ctx, req);
 			rc = ctx->ctx_crm_intf->add_req(&add_req);
 			if (rc) {
 				CAM_ERR(CAM_ISP, "Add req failed: req id=%llu",
 					req->request_id);
-			} else {
-				__cam_isp_ctx_enqueue_request_in_order(
-					ctx, req);
+				__cam_isp_ctx_dequeue_request(ctx, req);
 			}
 		} else {
 			rc = -EINVAL;

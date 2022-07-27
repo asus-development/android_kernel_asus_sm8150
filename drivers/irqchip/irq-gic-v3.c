@@ -46,6 +46,9 @@
 
 #include "irq-gic-common.h"
 
+//ASUS_BSP +++
+int gic_irq_cnt,gic_resume_irq;//[Power]Add these values to save IRQ's counts and number
+//ASUS_BSP ---
 struct redist_region {
 	void __iomem		*redist_base;
 	phys_addr_t		phys_base;
@@ -409,6 +412,9 @@ static void gic_hibernation_suspend(void)
 	void __iomem *base = gic_data.dist_base;
 	void __iomem *rdist_base = gic_data_rdist_sgi_base();
 
+	if ((base == NULL) || (rdist_base == NULL))
+		return;
+
 	gic_data.enabled_sgis = readl_relaxed(rdist_base + GICD_ISENABLER);
 	gic_data.pending_sgis = readl_relaxed(rdist_base + GICD_ISPENDR);
 	/* Store edge level for PPIs by reading GICR_ICFGR1 */
@@ -435,12 +441,46 @@ static int gic_suspend(void)
 	return 0;
 }
 
+/*AS-K Log Modem Wake Up QMI Info+*/
+#define MODEM_IRQ_VALUE 664
+static int modem_resume_irq_flag = 0;
+int modem_resume_irq_flag_function(void) {
+    if( modem_resume_irq_flag == 1 ) {
+        modem_resume_irq_flag = 0;
+        return 1;
+    }
+    return 0;
+}
+EXPORT_SYMBOL(modem_resume_irq_flag_function);
+/*AS-K Log Modem Wake Up QMI Info-*/
+
+/*AS-K Log Wake Up IP Address Info+*/
+#define IPA_IRQ_VALUE 107
+static int ipa_resume_irq_flag = 0;
+int ipa_resume_irq_flag_function(void) {
+    if( ipa_resume_irq_flag == 1 ) {
+        ipa_resume_irq_flag = 0;
+        return 1;
+    }
+    return 0;
+}
+EXPORT_SYMBOL(ipa_resume_irq_flag_function);
+/*AS-K Log Wake Up IP Address Info-*/
+
 static void gic_show_resume_irq(struct gic_chip_data *gic)
 {
 	unsigned int i;
 	u32 enabled;
 	u32 pending[32];
 	void __iomem *base = gic_data.dist_base;
+
+//ASUS_BSP +++ [PM]reset IRQ count and IRQ number every time.
+	gic_resume_irq=0;
+	gic_irq_cnt=0;
+//ASUS_BSP --- [PM]reset IRQ count and IRQ number every time.
+
+	if (base == NULL)
+		return;
 
 	if (!msm_show_resume_irq_mask)
 		return;
@@ -463,8 +503,26 @@ static void gic_show_resume_irq(struct gic_chip_data *gic)
 		else if (desc->action && desc->action->name)
 			name = desc->action->name;
 
-		pr_warn("%s: %d triggered %s\n", __func__, irq, name);
+		pr_warn("[PM] %s: %d triggered %s\n", __func__, irq, name);
+
+		/*AS-K Log Modem Wake Up QMI Info+*/
+		if(irq == MODEM_IRQ_VALUE) {
+			modem_resume_irq_flag = 1;
+                }
+		/*AS-K Log Modem Wake Up QMI Info-*/
+
+		/*AS-K Log Wake Up IP Address Info+*/
+		if(irq == IPA_IRQ_VALUE) {
+			ipa_resume_irq_flag = 1;
+                }
+		/*AS-K Log Wake Up IP Address Info-*/
+
+//ASUS_BSP +++ [PM]save IRQ's counts and number
+		gic_resume_irq = irq;
+		gic_irq_cnt++;
+//ASUS_BSP --- [PM]save IRQ's counts and number
 	}
+	printk("irq count: %d\n", gic_irq_cnt);
 }
 
 static void gic_resume_one(struct gic_chip_data *gic)
@@ -689,7 +747,7 @@ static int __gic_populate_rdist(struct redist_region *region, void __iomem *ptr)
 		gic_data_rdist_rd_base() = ptr;
 		gic_data_rdist()->phys_base = region->phys_base + offset;
 
-		pr_info("CPU%d: found redistributor %lx region %d:%pa\n",
+		pr_debug("CPU%d: found redistributor %lx region %d:%pa\n",
 			smp_processor_id(), mpidr,
 			(int)(region - gic_data.redist_regions),
 			&gic_data_rdist()->phys_base);
@@ -982,7 +1040,9 @@ static struct irq_chip gic_chip = {
 	.irq_set_affinity	= gic_set_affinity,
 	.irq_get_irqchip_state	= gic_irq_get_irqchip_state,
 	.irq_set_irqchip_state	= gic_irq_set_irqchip_state,
-	.flags			= IRQCHIP_SET_TYPE_MASKED,
+	.flags			= IRQCHIP_SET_TYPE_MASKED |
+				  IRQCHIP_SKIP_SET_WAKE |
+				  IRQCHIP_MASK_ON_SUSPEND,
 };
 
 static struct irq_chip gic_eoimode1_chip = {
@@ -995,7 +1055,9 @@ static struct irq_chip gic_eoimode1_chip = {
 	.irq_get_irqchip_state	= gic_irq_get_irqchip_state,
 	.irq_set_irqchip_state	= gic_irq_set_irqchip_state,
 	.irq_set_vcpu_affinity	= gic_irq_set_vcpu_affinity,
-	.flags			= IRQCHIP_SET_TYPE_MASKED,
+	.flags			= IRQCHIP_SET_TYPE_MASKED |
+				  IRQCHIP_SKIP_SET_WAKE |
+				  IRQCHIP_MASK_ON_SUSPEND,
 };
 
 #define GIC_ID_NR		(1U << gic_data.rdists.id_bits)
@@ -1365,7 +1427,7 @@ static void __init gic_of_setup_kvm_info(struct device_node *node)
 	gic_set_kvm_info(&gic_v3_kvm_info);
 }
 
-static int __init gic_of_init(struct device_node *node, struct device_node *parent)
+static int __init gicv3_of_init(struct device_node *node, struct device_node *parent)
 {
 	void __iomem *dist_base;
 	struct redist_region *rdist_regs;
@@ -1434,7 +1496,7 @@ out_unmap_dist:
 	return err;
 }
 
-IRQCHIP_DECLARE(gic_v3, "arm,gic-v3", gic_of_init);
+IRQCHIP_DECLARE(gic_v3, "arm,gic-v3", gicv3_of_init);
 
 #ifdef CONFIG_ACPI
 static struct

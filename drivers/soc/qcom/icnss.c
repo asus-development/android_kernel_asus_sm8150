@@ -960,12 +960,25 @@ static int icnss_driver_event_server_arrive(void *data)
 	int ret = 0;
 	bool ignore_assert = false;
 
-	if (!penv)
+	if (!penv) {
+		kfree(data);
 		return -ENODEV;
+	}
+
+	if (test_bit(ICNSS_MODEM_SHUTDOWN, &penv->state)) {
+		icnss_pr_dbg("WLFW server arrive: Modem is down");
+		kfree(data);
+		return -EINVAL;
+	}
 
 	set_bit(ICNSS_WLFW_EXISTS, &penv->state);
 	clear_bit(ICNSS_FW_DOWN, &penv->state);
 	icnss_ignore_fw_timeout(false);
+
+	if (test_bit(ICNSS_WLFW_CONNECTED, &penv->state)) {
+		icnss_pr_err("QMI Server already in Connected State\n");
+		ICNSS_ASSERT(0);
+	}
 
 	ret = icnss_connect_to_fw_server(penv, data);
 	if (ret)
@@ -1579,13 +1592,19 @@ static int icnss_modem_notifier_nb(struct notifier_block *nb,
 			icnss_pr_err("Not able to Collect msa0 segment dump, Apps permissions not assigned %d\n",
 				     ret);
 		}
+		clear_bit(ICNSS_MODEM_SHUTDOWN, &priv->state);
 		return NOTIFY_OK;
 	}
+
+	if (code == SUBSYS_AFTER_SHUTDOWN)
+		clear_bit(ICNSS_MODEM_SHUTDOWN, &priv->state);
 
 	if (code != SUBSYS_BEFORE_SHUTDOWN)
 		return NOTIFY_OK;
 
 	priv->is_ssr = true;
+
+	set_bit(ICNSS_MODEM_SHUTDOWN, &priv->state);
 
 	if (notif->crashed)
 		set_bit(ICNSS_MODEM_CRASHED, &priv->state);
@@ -3153,6 +3172,9 @@ static int icnss_stats_show_state(struct seq_file *s, struct icnss_priv *priv)
 			continue;
 		case ICNSS_MODEM_CRASHED:
 			seq_puts(s, "MODEM CRASHED");
+			continue;
+		case ICNSS_MODEM_SHUTDOWN:
+			seq_puts(s, "MODEM SHUTDOWN");
 		}
 
 		seq_printf(s, "UNKNOWN-%d", i);
@@ -3525,6 +3547,20 @@ static const struct file_operations icnss_regread_fops = {
 	.owner          = THIS_MODULE,
 	.llseek         = seq_lseek,
 };
+
+
+/* ASUS_BSP+++ for wlan firmware add debug ini */
+static char do_wlan_driver_log_level[256];
+module_param_string(do_wlan_driver_log_level,do_wlan_driver_log_level, sizeof(do_wlan_driver_log_level), S_IWUSR | S_IRUGO);
+MODULE_PARM_DESC(do_wlan_driver_log_level, "wlan driver log level flag");
+
+char * wcnss_get_driver_log_level(void)
+{
+       pr_info("[wcnss]: do_wlan_driver_log_level=%s.\n", do_wlan_driver_log_level);
+       return do_wlan_driver_log_level;
+}
+EXPORT_SYMBOL(wcnss_get_driver_log_level);
+/* ASUS_BSP--- for wlan firmware add debug ini  */
 
 #ifdef CONFIG_ICNSS_DEBUG
 static int icnss_debugfs_create(struct icnss_priv *priv)

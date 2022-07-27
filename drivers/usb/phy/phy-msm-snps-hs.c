@@ -34,6 +34,11 @@
 #define OPMODE_MASK				(0x3 << 3)
 #define OPMODE_NONDRIVING			(0x1 << 3)
 #define SLEEPM					BIT(0)
+#define OPMODE_NORMAL				(0x00)
+#define TERMSEL					BIT(5)
+
+#define USB2_PHY_USB_PHY_UTMI_CTRL1		(0x40)
+#define XCVRSEL					BIT(0)
 
 #define USB2_PHY_USB_PHY_UTMI_CTRL5		(0x50)
 #define POR					BIT(1)
@@ -88,6 +93,38 @@
 #define USB_HSPHY_1P8_HPM_LOAD			19000	/* uA */
 
 #define USB_HSPHY_VDD_HPM_LOAD			30000	/* uA */
+
+#define PARAMETER_OVERRIDE_X0			0x6C
+#define PARAMETER_OVERRIDE_X1			0x70
+#define PARAMETER_OVERRIDE_X2			0x74
+#define PARAMETER_OVERRIDE_X3			0x78
+
+unsigned int OVERRIDE_X0;
+module_param(OVERRIDE_X0, uint, S_IRUGO | S_IWUSR);
+MODULE_PARM_DESC(OVERRIDE_X0, "PARAMETER_OVERRIDE_X0");
+
+unsigned int OVERRIDE_X1;
+module_param(OVERRIDE_X1, uint, S_IRUGO | S_IWUSR);
+MODULE_PARM_DESC(OVERRIDE_X1, "PARAMETER_OVERRIDE_X1");
+
+unsigned int OVERRIDE_X2;
+module_param(OVERRIDE_X2, uint, S_IRUGO | S_IWUSR);
+MODULE_PARM_DESC(OVERRIDE_X2, "PARAMETER_OVERRIDE_X2");
+
+unsigned int OVERRIDE_X3;
+module_param(OVERRIDE_X3, uint, S_IRUGO | S_IWUSR);
+MODULE_PARM_DESC(OVERRIDE_X3, "PARAMETER_OVERRIDE_X3");
+
+// ASUS_BSP Hardcode Eye-Diagram Parameters +++
+unsigned int default_device_parameter_0;
+unsigned int default_device_parameter_1;
+unsigned int default_device_parameter_2;
+unsigned int default_device_parameter_3;
+unsigned int default_host_parameter_0;
+unsigned int default_host_parameter_1;
+unsigned int default_host_parameter_2;
+unsigned int default_host_parameter_3;
+// ASUS_BSP Hardcode Eye-Diagram Parameters ---
 
 struct msm_hsphy {
 	struct usb_phy		phy;
@@ -378,7 +415,7 @@ static int msm_hsphy_init(struct usb_phy *uphy)
 	int ret;
 	u32 rcal_code = 0;
 
-	dev_dbg(uphy->dev, "%s\n", __func__);
+	pr_info("[USB] %s +++\n", __func__);
 
 	ret = msm_hsphy_enable_power(phy, true);
 	if (ret)
@@ -413,6 +450,104 @@ static int msm_hsphy_init(struct usb_phy *uphy)
 	if (phy->param_override_seq)
 		hsusb_phy_write_seq(phy->base, phy->param_override_seq,
 				phy->param_override_seq_cnt, 0);
+
+	//  ********** ASUS_BSP Hardcode Eye-Diagram Parameters **********
+	//  ZS630KL_EVB3 : 2
+	//  ZS630KL_SR :   3
+	//  ZS630KL_ER :   4
+	//  ZS630KL_PR :   5
+	//  ZS630KL_MP :   6
+	pr_info("[USB] %s(): Current hardware ID : (%d)", __func__, g_ASUS_hwID);
+	switch(g_ASUS_hwID){
+		case HW_REV_ER:
+			default_device_parameter_0=0x67;
+			default_device_parameter_1=0x0b;
+			default_device_parameter_2=0x3c;
+			default_device_parameter_3=0x03;
+			default_host_parameter_0=0x67;
+			default_host_parameter_1=0x0b;
+			default_host_parameter_2=0x3c;
+			default_host_parameter_3=0x03;
+		break;
+		case HW_REV_SR:
+			default_device_parameter_0=0xf8;
+			default_device_parameter_1=0x1f;
+			default_device_parameter_2=0x81;
+			default_device_parameter_3=0xc7;
+			default_host_parameter_0=0x67;
+			default_host_parameter_1=0x0b;
+			default_host_parameter_2=0x3c;
+			default_host_parameter_3=0x03;
+		break;
+		case HW_REV_EVB3:
+			default_device_parameter_0=0xf8;
+			default_device_parameter_1=0x1f;
+			default_device_parameter_2=0x81;
+			default_device_parameter_3=0xc7;
+			default_host_parameter_0=0xf8;
+			default_host_parameter_1=0x1f;
+			default_host_parameter_2=0x81;
+			default_host_parameter_3=0xc7;
+		break;
+		case HW_REV_EVB2:
+			default_device_parameter_0=0xf8;
+			default_device_parameter_1=0x1f;
+			default_device_parameter_2=0x81;
+			default_device_parameter_3=0xc7;
+			default_host_parameter_0=0xf8;
+			default_host_parameter_1=0x1f;
+			default_host_parameter_2=0x81;
+			default_host_parameter_3=0xc7;
+		break;
+		default:
+			default_device_parameter_0=0x67;
+			default_device_parameter_1=0x0b;
+			default_device_parameter_2=0x3c;
+			default_device_parameter_3=0x03;
+			default_host_parameter_0=0x67;
+			default_host_parameter_1=0x0b;
+			default_host_parameter_2=0x3c;
+			default_host_parameter_3=0x03;
+		break;
+	}
+	if(phy->phy.flags & PHY_HOST_MODE) {
+		pr_info("[USB] %s():host default modparams val:0x%x %x %x %x\n",
+				__func__, default_host_parameter_0, default_host_parameter_1,
+				default_host_parameter_2, default_host_parameter_3);
+		writel_relaxed(default_host_parameter_0, phy->base + PARAMETER_OVERRIDE_X0);
+		writel_relaxed(default_host_parameter_1, phy->base + PARAMETER_OVERRIDE_X1);
+		writel_relaxed(default_host_parameter_2, phy->base + PARAMETER_OVERRIDE_X2);
+		writel_relaxed(default_host_parameter_3, phy->base + PARAMETER_OVERRIDE_X3);
+	}
+	else
+	{
+		pr_info("[USB] %s():device default modparams val:0x%x %x %x %x\n",
+				__func__, default_device_parameter_0, default_device_parameter_1,
+				default_device_parameter_2, default_device_parameter_3);
+		writel_relaxed(default_device_parameter_0, phy->base + PARAMETER_OVERRIDE_X0);
+		writel_relaxed(default_device_parameter_1, phy->base + PARAMETER_OVERRIDE_X1);
+		writel_relaxed(default_device_parameter_2, phy->base + PARAMETER_OVERRIDE_X2);
+		writel_relaxed(default_device_parameter_3, phy->base + PARAMETER_OVERRIDE_X3);
+	}
+	//  ********** ASUS_BSP Hardcode Eye-Diagram Parameters **********
+
+
+	/* If tune modparam set, override tune value */
+	pr_info("[USB] %s():userspecified modparams PARAMETER_OVERRIDE_X0 val:0x%x %x %x %x\n",
+	__func__, OVERRIDE_X0, OVERRIDE_X1, OVERRIDE_X2, OVERRIDE_X3);
+
+	if (OVERRIDE_X0)
+		writel_relaxed(OVERRIDE_X0,
+				phy->base + PARAMETER_OVERRIDE_X0);
+	if (OVERRIDE_X1)
+		writel_relaxed(OVERRIDE_X1,
+				phy->base + PARAMETER_OVERRIDE_X1);
+	if (OVERRIDE_X2)
+		writel_relaxed(OVERRIDE_X2,
+				phy->base + PARAMETER_OVERRIDE_X2);
+	if (OVERRIDE_X3)
+		writel_relaxed(OVERRIDE_X3,
+				phy->base + PARAMETER_OVERRIDE_X3);
 
 	if (phy->pre_emphasis) {
 		u8 val = TXPREEMPAMPTUNE0(phy->pre_emphasis) &
@@ -496,6 +631,14 @@ static int msm_hsphy_init(struct usb_phy *uphy)
 	msm_usb_write_readback(phy->base, USB2_PHY_USB_PHY_CFG0,
 				UTMI_PHY_CMN_CTRL_OVERRIDE_EN, 0);
 
+	pr_info("[USB] Read Param0:%02x, Param1:%02x, Param2:%02x, Param3:%02x\n",
+		readb_relaxed(phy->base + PARAMETER_OVERRIDE_X0),
+		readb_relaxed(phy->base + PARAMETER_OVERRIDE_X1),
+		readb_relaxed(phy->base + PARAMETER_OVERRIDE_X2),
+		readb_relaxed(phy->base + PARAMETER_OVERRIDE_X3));
+
+	pr_info("[USB] %s ---\n", __func__);
+
 	return 0;
 }
 
@@ -559,6 +702,63 @@ static int msm_hsphy_notify_disconnect(struct usb_phy *uphy,
 
 	phy->cable_connected = false;
 
+	return 0;
+}
+
+static int msm_hsphy_drive_dp_pulse(struct usb_phy *uphy,
+					unsigned int interval_ms)
+{
+	struct msm_hsphy *phy = container_of(uphy, struct msm_hsphy, phy);
+	int ret;
+
+	ret = msm_hsphy_enable_power(phy, true);
+	if (ret < 0) {
+		dev_dbg(uphy->dev,
+			"dpdm regulator enable failed:%d\n", ret);
+		return ret;
+	}
+	msm_hsphy_enable_clocks(phy, true);
+
+	/* set UTMI_PHY_CMN_CNTRL_OVERRIDE_EN &
+	 * UTMI_PHY_DATAPATH_CTRL_OVERRIDE_EN
+	 */
+	msm_usb_write_readback(phy->base, USB2_PHY_USB_PHY_CFG0,
+				UTMI_PHY_CMN_CTRL_OVERRIDE_EN,
+				UTMI_PHY_CMN_CTRL_OVERRIDE_EN);
+	msm_usb_write_readback(phy->base, USB2_PHY_USB_PHY_CFG0,
+				UTMI_PHY_DATAPATH_CTRL_OVERRIDE_EN,
+				UTMI_PHY_DATAPATH_CTRL_OVERRIDE_EN);
+	/* set OPMODE to normal i.e. 0x0 & termsel to fs */
+	msm_usb_write_readback(phy->base, USB2_PHY_USB_PHY_UTMI_CTRL0,
+				OPMODE_MASK, OPMODE_NORMAL);
+	msm_usb_write_readback(phy->base, USB2_PHY_USB_PHY_UTMI_CTRL0,
+				TERMSEL, TERMSEL);
+	/* set XCVRSEL to fs */
+	msm_usb_write_readback(phy->base, USB2_PHY_USB_PHY_UTMI_CTRL1,
+					XCVRSEL, XCVRSEL);
+	msleep(interval_ms);
+	/* clear TERMSEL to fs */
+	msm_usb_write_readback(phy->base, USB2_PHY_USB_PHY_UTMI_CTRL0,
+				TERMSEL, 0x00);
+	/* clear XCVRSEL */
+	msm_usb_write_readback(phy->base, USB2_PHY_USB_PHY_UTMI_CTRL1,
+					XCVRSEL, 0x00);
+	/* clear UTMI_PHY_CMN_CNTRL_OVERRIDE_EN &
+	 * UTMI_PHY_DATAPATH_CTRL_OVERRIDE_EN
+	 */
+	msm_usb_write_readback(phy->base, USB2_PHY_USB_PHY_CFG0,
+				UTMI_PHY_CMN_CTRL_OVERRIDE_EN, 0x00);
+	msm_usb_write_readback(phy->base, USB2_PHY_USB_PHY_CFG0,
+				UTMI_PHY_DATAPATH_CTRL_OVERRIDE_EN, 0x00);
+
+	msleep(20);
+
+	msm_hsphy_enable_clocks(phy, false);
+	ret = msm_hsphy_enable_power(phy, false);
+	if (ret < 0) {
+		dev_dbg(uphy->dev,
+			"dpdm regulator disable failed:%d\n", ret);
+	}
 	return 0;
 }
 
@@ -880,6 +1080,7 @@ static int msm_hsphy_probe(struct platform_device *pdev)
 	phy->phy.notify_connect		= msm_hsphy_notify_connect;
 	phy->phy.notify_disconnect	= msm_hsphy_notify_disconnect;
 	phy->phy.type			= USB_PHY_TYPE_USB2;
+	phy->phy.drive_dp_pulse		= msm_hsphy_drive_dp_pulse;
 
 	ret = usb_add_phy_dev(&phy->phy);
 	if (ret)

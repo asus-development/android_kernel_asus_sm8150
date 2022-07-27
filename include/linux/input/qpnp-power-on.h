@@ -61,6 +61,9 @@ enum pon_restart_reason {
 	PON_RESTART_REASON_DMVERITY_CORRUPTED	= 0x04,
 	PON_RESTART_REASON_DMVERITY_ENFORCE	= 0x05,
 	PON_RESTART_REASON_KEYS_CLEAR		= 0x06,
+	PON_RESTART_REASON_UNLOCK			= 0xa,
+	PON_RESTART_REASON_KERNEL		= 0x10,
+	PON_RESTART_REASON_PANIC		= 0x11,
 };
 
 #ifdef CONFIG_INPUT_QPNP_POWER_ON
@@ -71,6 +74,7 @@ int qpnp_pon_wd_config(bool enable);
 int qpnp_pon_set_restart_reason(enum pon_restart_reason reason);
 bool qpnp_pon_check_hard_reset_stored(void);
 
+int asus_enable_resin_irq_wake(bool en);
 #else
 static int qpnp_pon_system_pwr_off(enum pon_power_off_type type)
 {

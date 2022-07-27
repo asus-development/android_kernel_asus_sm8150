@@ -356,10 +356,12 @@ static int max_ires_curr_ma_table[MAX_IRES_LEVELS] = {
 
 static inline int get_current_reg_code(int target_curr_ma, int ires_ua)
 {
+	int cur_reg_val = 0;
 	if (!ires_ua || !target_curr_ma || (target_curr_ma < (ires_ua / 1000)))
 		return 0;
-
-	return DIV_ROUND_CLOSEST(target_curr_ma * 1000, ires_ua) - 1;
+	cur_reg_val = DIV_ROUND_CLOSEST(target_curr_ma * 1000, ires_ua) * ires_ua > target_curr_ma * 1000 ?
+	    DIV_ROUND_CLOSEST(target_curr_ma * 1000, ires_ua) - 1: DIV_ROUND_CLOSEST(target_curr_ma * 1000, ires_ua);
+	return cur_reg_val;
 }
 
 static int qpnp_flash_led_read(struct qpnp_flash_led *led, u16 addr, u8 *data)
@@ -756,8 +758,11 @@ static int get_property_from_fg(struct qpnp_flash_led *led,
 	union power_supply_propval pval = {0, };
 
 	if (!led->bms_psy) {
-		pr_err("no bms psy found\n");
-		return -EINVAL;
+		led->bms_psy = power_supply_get_by_name("bms");
+		if (!led->bms_psy) {
+			pr_err_ratelimited("Couldn't get bms_psy\n");
+			return -ENODEV;
+		}
 	}
 
 	rc = power_supply_get_property(led->bms_psy, prop, &pval);
@@ -1815,41 +1820,6 @@ static struct device_attribute qpnp_flash_led_attrs[] = {
 	__ATTR(enable, 0664, NULL, qpnp_flash_led_prepare_store),
 };
 
-static int flash_led_psy_notifier_call(struct notifier_block *nb,
-		unsigned long ev, void *v)
-{
-	struct power_supply *psy = v;
-	struct qpnp_flash_led *led =
-			container_of(nb, struct qpnp_flash_led, nb);
-
-	if (ev != PSY_EVENT_PROP_CHANGED)
-		return NOTIFY_OK;
-
-	if (!strcmp(psy->desc->name, "bms")) {
-		led->bms_psy = power_supply_get_by_name("bms");
-		if (!led->bms_psy)
-			pr_err("Failed to get bms power_supply\n");
-		else
-			power_supply_unreg_notifier(&led->nb);
-	}
-
-	return NOTIFY_OK;
-}
-
-static int flash_led_psy_register_notifier(struct qpnp_flash_led *led)
-{
-	int rc;
-
-	led->nb.notifier_call = flash_led_psy_notifier_call;
-	rc = power_supply_reg_notifier(&led->nb);
-	if (rc < 0) {
-		pr_err("Couldn't register psy notifier, rc = %d\n", rc);
-		return rc;
-	}
-
-	return 0;
-}
-
 /* irq handler */
 static irqreturn_t qpnp_flash_led_irq_handler(int irq, void *_led)
 {
@@ -2842,15 +2812,6 @@ static int qpnp_flash_led_probe(struct platform_device *pdev)
 		if (rc < 0) {
 			pr_err("Unable to request led_fault(%d) IRQ(err:%d)\n",
 				led->pdata->led_fault_irq, rc);
-			goto error_switch_register;
-		}
-	}
-
-	led->bms_psy = power_supply_get_by_name("bms");
-	if (!led->bms_psy) {
-		rc = flash_led_psy_register_notifier(led);
-		if (rc < 0) {
-			pr_err("Couldn't register psy notifier, rc = %d\n", rc);
 			goto error_switch_register;
 		}
 	}

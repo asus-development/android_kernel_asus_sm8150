@@ -32,6 +32,7 @@ struct completion {
 #ifdef CONFIG_LOCKDEP_COMPLETIONS
 	struct lockdep_map_cross map;
 #endif
+	char name[32];
 };
 
 #ifdef CONFIG_LOCKDEP_COMPLETIONS
@@ -71,7 +72,7 @@ static inline void complete_release_commit(struct completion *x) {}
 	STATIC_CROSS_LOCKDEP_MAP_INIT("(complete)" #work, &(work)) }
 #else
 #define COMPLETION_INITIALIZER(work) \
-	{ 0, __WAIT_QUEUE_HEAD_INITIALIZER((work).wait) }
+	{ 0, __WAIT_QUEUE_HEAD_INITIALIZER((work).wait), #work}
 #endif
 
 #define COMPLETION_INITIALIZER_ONSTACK(work) \

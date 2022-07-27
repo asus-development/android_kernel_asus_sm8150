@@ -4,6 +4,13 @@
 #
 
 # Each configuration option enables a list of files.
+ccflags-y += -Idrivers/media/platform/msm/camera/cam_utils
+ccflags-y += -Idrivers/media/platform/msm/camera/cam_cpas/include
+ccflags-y += -Idrivers/media/platform/msm/camera/cam_sensor_module/cam_sensor_utils
+ccflags-y += -Idrivers/media/platform/msm/camera/cam_sensor_module/cam_sensor_io
+ccflags-y += -Idrivers/media/platform/msm/camera/cam_sensor_module/cam_cci
+ccflags-y += -Idrivers/media/platform/msm/camera/cam_req_mgr
+ccflags-y += -Idrivers/media/platform/msm/camera/cam_smmu
 
 obj-$(CONFIG_INPUT_88PM860X_ONKEY)	+= 88pm860x_onkey.o
 obj-$(CONFIG_INPUT_88PM80X_ONKEY)	+= 88pm80x_onkey.o
@@ -85,3 +92,5 @@ obj-$(CONFIG_INPUT_WM831X_ON)		+= wm831x-on.o
 obj-$(CONFIG_INPUT_XEN_KBDDEV_FRONTEND)	+= xen-kbdfront.o
 obj-$(CONFIG_INPUT_YEALINK)		+= yealink.o
 obj-$(CONFIG_INPUT_IDEAPAD_SLIDEBAR)	+= ideapad_slidebar.o
+obj-$(CONFIG_SENSORS_ICM206XX)		+= icm206xx.o
+obj-$(CONFIG_INPUT_STMVL53L1)        += vl53L1/

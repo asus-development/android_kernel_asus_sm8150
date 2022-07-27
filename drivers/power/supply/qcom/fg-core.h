@@ -13,6 +13,7 @@
 #ifndef __FG_CORE_H__
 #define __FG_CORE_H__
 
+#include <linux/alarmtimer.h>
 #include <linux/atomic.h>
 #include <linux/bitops.h>
 #include <linux/debugfs.h>
@@ -23,13 +24,16 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
+#include <linux/alarmtimer.h>
 #include <linux/power_supply.h>
 #include <linux/regmap.h>
 #include <linux/slab.h>
+#include <linux/spinlock.h>
 #include <linux/string_helpers.h>
 #include <linux/types.h>
 #include <linux/uaccess.h>
 #include <linux/pmic-voter.h>
+#include <linux/extcon.h>	//ASUS BSP
 
 #define fg_dbg(fg, reason, fmt, ...)			\
 	do {							\
@@ -64,6 +68,7 @@
 #define PROFILE_LOAD		"fg_profile_load"
 #define TTF_PRIMING		"fg_ttf_priming"
 #define ESR_CALIB		"fg_esr_calib"
+#define FG_ESR_VOTER		"fg_esr_voter"
 
 /* Delta BSOC irq votable reasons */
 #define DELTA_BSOC_IRQ_VOTER	"fg_delta_bsoc_irq"
@@ -79,7 +84,7 @@
 #define FG_PARALLEL_EN_VOTER	"fg_parallel_en"
 #define MEM_ATTN_IRQ_VOTER	"fg_mem_attn_irq"
 
-#define DEBUG_BOARD_VOTER	"fg_debug_board"
+#define FG_DEBUG_BOARD_VOTER	"fg_debug_board"
 
 #define BUCKET_COUNT			8
 #define BUCKET_SOC_PCT			(256 / BUCKET_COUNT)
@@ -112,6 +117,12 @@ enum fg_debug_flag {
 	FG_BUS_READ		= BIT(6), /* Show REGMAP reads */
 	FG_CAP_LEARN		= BIT(7), /* Show capacity learning */
 	FG_TTF			= BIT(8), /* Show time to full */
+	FG_FVSS			= BIT(9), /* Show FVSS */
+};
+
+enum awake_reasons {
+	FG_SW_ESR_WAKE = BIT(0),
+	FG_STATUS_NOTIFY_WAKE = BIT(1),
 };
 
 /* SRAM access */
@@ -180,6 +191,7 @@ enum fg_sram_param_id {
 	FG_SRAM_VBAT_TAU,
 	FG_SRAM_VBAT_FINAL,
 	FG_SRAM_IBAT_FINAL,
+	FG_SRAM_IBAT_FLT,
 	FG_SRAM_ESR,
 	FG_SRAM_ESR_MDL,
 	FG_SRAM_ESR_ACT,
@@ -207,13 +219,18 @@ enum fg_sram_param_id {
 	FG_SRAM_DELTA_MSOC_THR,
 	FG_SRAM_DELTA_BSOC_THR,
 	FG_SRAM_RECHARGE_SOC_THR,
+	FG_SRAM_SYNC_SLEEP_THR,
 	FG_SRAM_RECHARGE_VBATT_THR,
 	FG_SRAM_KI_COEFF_LOW_DISCHG,
 	FG_SRAM_KI_COEFF_MED_DISCHG,
 	FG_SRAM_KI_COEFF_HI_DISCHG,
+	FG_SRAM_KI_COEFF_LO_MED_DCHG_THR,
+	FG_SRAM_KI_COEFF_MED_HI_DCHG_THR,
 	FG_SRAM_KI_COEFF_LOW_CHG,
 	FG_SRAM_KI_COEFF_MED_CHG,
 	FG_SRAM_KI_COEFF_HI_CHG,
+	FG_SRAM_KI_COEFF_LO_MED_CHG_THR,
+	FG_SRAM_KI_COEFF_MED_HI_CHG_THR,
 	FG_SRAM_KI_COEFF_FULL_SOC,
 	FG_SRAM_KI_COEFF_CUTOFF,
 	FG_SRAM_ESR_TIGHT_FILTER,
@@ -293,6 +310,12 @@ enum slope_limit_status {
 	SLOPE_LIMIT_NUM_COEFFS,
 };
 
+enum esr_filter_status {
+	ROOM_TEMP = 1,
+	LOW_TEMP,
+	RELAX_TEMP,
+};
+
 enum esr_timer_config {
 	TIMER_RETRY = 0,
 	TIMER_MAX,
@@ -323,7 +346,7 @@ struct fg_cyc_ctr_data {
 	bool		started[BUCKET_COUNT];
 	u16		count[BUCKET_COUNT];
 	u8		last_soc[BUCKET_COUNT];
-	int		id;
+	char		counter[BUCKET_COUNT * 8];
 	struct mutex	lock;
 };
 
@@ -428,15 +451,21 @@ struct fg_dev {
 	int			*debug_mask;
 	struct fg_batt_props	bp;
 	struct notifier_block	nb;
+	struct alarm            esr_sw_timer;
+	struct notifier_block	twm_nb;
 	struct mutex		bus_lock;
 	struct mutex		sram_rw_lock;
 	struct mutex		charge_full_lock;
 	struct mutex		qnovo_esr_ctrl_lock;
+	spinlock_t		suspend_lock;
+	spinlock_t		awake_lock;
 	u32			batt_soc_base;
 	u32			batt_info_base;
 	u32			mem_if_base;
 	u32			rradc_base;
 	u32			wa_flags;
+	u32			esr_wakeup_ms;
+	u32			awake_status;
 	int			batt_id_ohms;
 	int			charge_status;
 	int			prev_charge_status;
@@ -450,6 +479,8 @@ struct fg_dev {
 	int			delta_soc;
 	int			last_msoc;
 	int			last_recharge_volt_mv;
+	int			delta_temp_irq_count;
+	enum esr_filter_status	esr_flt_sts;
 	bool			profile_available;
 	enum prof_load_status	profile_load_status;
 	bool			battery_missing;
@@ -458,15 +489,101 @@ struct fg_dev {
 	bool			recharge_soc_adjusted;
 	bool			soc_reporting_ready;
 	bool			use_ima_single_mode;
+	bool			usb_present;
+	bool			twm_state;
 	bool			use_dma;
 	bool			qnovo_enable;
 	enum fg_version		version;
+	bool			suspended;
 	struct completion	soc_update;
 	struct completion	soc_ready;
 	struct delayed_work	profile_load_work;
 	struct work_struct	status_change_work;
+	struct work_struct	esr_sw_work;
 	struct delayed_work	sram_dump_work;
+	struct work_struct	esr_filter_work;
+	struct alarm		esr_filter_alarm;
+	ktime_t			last_delta_temp_time;
+	//ASUS BSP +++
+	struct extcon_dev	*bat_ver_extcon;
+	struct extcon_dev	*bat_id_extcon;
+//ASUS BSP ---
+//ASUS_BSP battery safety upgrade +++
+	unsigned long condition1_battery_time;
+	unsigned long condition2_battery_time;
+	int condition1_cycle_count;
+	int condition2_cycle_count;
+	unsigned long condition1_temp_vol_time;
+	unsigned long condition2_temp_vol_time;
+	unsigned long condition1_temp_time;
+	unsigned long condition2_temp_time;
+	unsigned long condition1_vol_time;
+	unsigned long condition2_vol_time;
+//ASUS_BSP battery safety upgrade ---
 };
+
+//ASUS_BSP battery safety upgrade +++
+/* Cycle Count Date Structure saved in emmc
+ * magic - magic number for data verification
+ * charge_cap_accum - Accumulated charging capacity
+ * charge_last_soc - last saved soc before reset/shutdown
+ * [0]:battery_soc [1]:system_soc [2]:monotonic_soc
+ */
+struct CYCLE_COUNT_DATA{
+	int magic;
+	int cycle_count;
+	unsigned long battery_total_time;
+	unsigned long high_vol_total_time;
+	unsigned long high_temp_total_time;
+	unsigned long high_temp_vol_time;
+	u32 reload_condition;
+};
+
+#define HIGH_TEMP   350
+#define HIGHER_TEMP 450
+#define FULL_CAPACITY_VALUE 100
+#define BATTERY_USE_TIME_CONDITION1  (12*30*24*60*60) //12Months
+#define BATTERY_USE_TIME_CONDITION2  (18*30*24*60*60) //18Months
+#define CYCLE_COUNT_CONDITION1  100
+#define CYCLE_COUNT_CONDITION2  400
+#define HIGH_TEMP_VOL_TIME_CONDITION1 (15*24*60*60)  //15Days
+#define HIGH_TEMP_VOL_TIME_CONDITION2 (30*24*60*60)  //30Days
+#define HIGH_TEMP_TIME_CONDITION1     (6*30*24*60*60) //6Months
+#define HIGH_TEMP_TIME_CONDITION2     (12*30*24*60*60) //12Months
+#define HIGH_VOL_TIME_CONDITION1     (6*30*24*60*60) //6Months
+#define HIGH_VOL_TIME_CONDITION2     (12*30*24*60*60) //12Months
+
+enum calculation_time_type {
+	TOTOL_TIME_CAL_TYPE,
+	HIGH_VOL_CAL_TYPE,
+	HIGH_TEMP_CAL_TYPE,
+	HIGH_TEMP_VOL_CAL_TYPE,
+};
+//ASUS_BSP battery safety upgrade ---
+
+//ASUS_BS battery health upgrade +++
+#define BAT_HEALTH_NUMBER_MAX 21
+struct BAT_HEALTH_DATA{
+	int magic;
+	int bat_current;
+	unsigned long long bat_current_avg;
+	unsigned long long accumulate_time; //second
+	unsigned long long accumulate_current; //uA
+	int bat_health;
+	unsigned long start_time;
+	unsigned long end_time;
+};
+struct BAT_HEALTH_DATA_BACKUP{
+    char date[20];
+    int health;
+};
+//ASUS_BS battery health upgrade ---
+
+//ASUS_BSP +++
+static const unsigned int asus_fg_extcon_cable[] = {
+	EXTCON_NONE,
+};
+//ASUS_BSP ---
 
 /* Debugfs data structures are below */
 
@@ -502,6 +619,8 @@ extern int fg_decode_voltage_24b(struct fg_sram_param *sp,
 extern int fg_decode_voltage_15b(struct fg_sram_param *sp,
 	enum fg_sram_param_id id, int val);
 extern int fg_decode_current_16b(struct fg_sram_param *sp,
+	enum fg_sram_param_id id, int val);
+extern int fg_decode_current_24b(struct fg_sram_param *sp,
 	enum fg_sram_param_id id, int val);
 extern int fg_decode_cc_soc(struct fg_sram_param *sp,
 	enum fg_sram_param_id id, int value);
@@ -572,4 +691,6 @@ extern int fg_circ_buf_avg(struct fg_circ_buf *buf, int *avg);
 extern int fg_circ_buf_median(struct fg_circ_buf *buf, int *median);
 extern int fg_lerp(const struct fg_pt *pts, size_t tablesize, s32 input,
 			s32 *output);
+void fg_stay_awake(struct fg_dev *fg, int awake_reason);
+void fg_relax(struct fg_dev *fg, int awake_reason);
 #endif

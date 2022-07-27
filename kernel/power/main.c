@@ -15,10 +15,66 @@
 #include <linux/workqueue.h>
 #include <linux/debugfs.h>
 #include <linux/seq_file.h>
-
+#include <linux/extcon.h>
+#include <../../drivers/extcon/extcon.h>
+#include <linux/module.h>
 #include "power.h"
 
 DEFINE_MUTEX(pm_mutex);
+
+#define EXTCON_SUSPEND 	1
+static struct extcon_dev pmsp_dev;
+static struct extcon_dev pmsp_logcat_dev;
+struct work_struct pms_printer;
+static struct extcon_dev pm_dumpthread_dev;
+struct work_struct pm_cpuinfo_printer;
+static const unsigned int pmsp_supported_cable [] = {
+	EXTCON_SUSPEND,
+	EXTCON_NONE,
+};
+
+extern struct timer_list unattended_timer;
+extern int pm_stay_unattended_period;
+
+void pmsp_print(void)
+{
+	schedule_work(&pms_printer);
+	return;
+}
+EXPORT_SYMBOL(pmsp_print);
+
+void print_pm_cpuinfo(void)
+{
+	schedule_work(&pm_cpuinfo_printer);
+	return;
+}
+
+void pms_printer_func(struct work_struct *work)
+{
+	static int pmsp_counter = 0;
+
+	if(pmsp_counter % 2) {
+		printk("[PM] %s:enter pmsprinter ready to send uevent 0 \n",__func__);
+		extcon_set_state_sync(&pmsp_dev, EXTCON_SUSPEND, 0);
+		extcon_set_state_sync(&pmsp_logcat_dev, EXTCON_SUSPEND, 0);
+		pmsp_counter++;
+	}
+	else {
+		printk("[PM] %s:enter pmsprinter ready to send uevent 1 \n",__func__);
+		extcon_set_state_sync(&pmsp_dev, EXTCON_SUSPEND, 1);
+		extcon_set_state_sync(&pmsp_logcat_dev, EXTCON_SUSPEND, 1);
+		pmsp_counter++;
+	}
+}
+
+void pm_cpuinfo_func(struct work_struct *work)
+{
+	static bool toggle = false;
+
+	toggle = !toggle;
+	printk("[PM] %s: Dump PowerManagerService wakelocks, toggle %d\n",__func__, toggle ? 1 : 0);
+	extcon_set_state_sync(&pm_dumpthread_dev, EXTCON_SUSPEND, toggle);
+}
 
 #ifdef CONFIG_PM_SLEEP
 
@@ -213,7 +269,6 @@ static ssize_t pm_test_store(struct kobject *kobj, struct kobj_attribute *attr,
 power_attr(pm_test);
 #endif /* CONFIG_PM_SLEEP_DEBUG */
 
-#ifdef CONFIG_DEBUG_FS
 static char *suspend_step_name(enum suspend_stat_step step)
 {
 	switch (step) {
@@ -234,6 +289,92 @@ static char *suspend_step_name(enum suspend_stat_step step)
 	}
 }
 
+#define suspend_attr(_name)					\
+static ssize_t _name##_show(struct kobject *kobj,		\
+		struct kobj_attribute *attr, char *buf)		\
+{								\
+	return sprintf(buf, "%d\n", suspend_stats._name);	\
+}								\
+static struct kobj_attribute _name = __ATTR_RO(_name)
+
+suspend_attr(success);
+suspend_attr(fail);
+suspend_attr(failed_freeze);
+suspend_attr(failed_prepare);
+suspend_attr(failed_suspend);
+suspend_attr(failed_suspend_late);
+suspend_attr(failed_suspend_noirq);
+suspend_attr(failed_resume);
+suspend_attr(failed_resume_early);
+suspend_attr(failed_resume_noirq);
+
+static ssize_t last_failed_dev_show(struct kobject *kobj,
+		struct kobj_attribute *attr, char *buf)
+{
+	int index;
+	char *last_failed_dev = NULL;
+
+	index = suspend_stats.last_failed_dev + REC_FAILED_NUM - 1;
+	index %= REC_FAILED_NUM;
+	last_failed_dev = suspend_stats.failed_devs[index];
+
+	return sprintf(buf, "%s\n", last_failed_dev);
+}
+static struct kobj_attribute last_failed_dev = __ATTR_RO(last_failed_dev);
+
+static ssize_t last_failed_errno_show(struct kobject *kobj,
+		struct kobj_attribute *attr, char *buf)
+{
+	int index;
+	int last_failed_errno;
+
+	index = suspend_stats.last_failed_errno + REC_FAILED_NUM - 1;
+	index %= REC_FAILED_NUM;
+	last_failed_errno = suspend_stats.errno[index];
+
+	return sprintf(buf, "%d\n", last_failed_errno);
+}
+static struct kobj_attribute last_failed_errno = __ATTR_RO(last_failed_errno);
+
+static ssize_t last_failed_step_show(struct kobject *kobj,
+		struct kobj_attribute *attr, char *buf)
+{
+	int index;
+	enum suspend_stat_step step;
+	char *last_failed_step = NULL;
+
+	index = suspend_stats.last_failed_step + REC_FAILED_NUM - 1;
+	index %= REC_FAILED_NUM;
+	step = suspend_stats.failed_steps[index];
+	last_failed_step = suspend_step_name(step);
+
+	return sprintf(buf, "%s\n", last_failed_step);
+}
+static struct kobj_attribute last_failed_step = __ATTR_RO(last_failed_step);
+
+static struct attribute *suspend_attrs[] = {
+	&success.attr,
+	&fail.attr,
+	&failed_freeze.attr,
+	&failed_prepare.attr,
+	&failed_suspend.attr,
+	&failed_suspend_late.attr,
+	&failed_suspend_noirq.attr,
+	&failed_resume.attr,
+	&failed_resume_early.attr,
+	&failed_resume_noirq.attr,
+	&last_failed_dev.attr,
+	&last_failed_errno.attr,
+	&last_failed_step.attr,
+	NULL,
+};
+
+static struct attribute_group suspend_attr_group = {
+	.name = "suspend_stats",
+	.attrs = suspend_attrs,
+};
+
+#ifdef CONFIG_DEBUG_FS
 static int suspend_stats_show(struct seq_file *s, void *unused)
 {
 	int i, index, last_dev, last_errno, last_step;
@@ -496,6 +637,17 @@ static ssize_t state_store(struct kobject *kobj, struct kobj_attribute *attr,
 
 	state = decode_state(buf, n);
 	if (state < PM_SUSPEND_MAX) {
+
+		if (state == PM_SUSPEND_ON) {
+			printk("[PM]unattended_timer: del_timer (state_store on)\n");
+			del_timer(&unattended_timer);
+			pm_stay_unattended_period = 0;
+		}
+		else {
+			printk("[PM]unattended_timer: mod_timer (state_store mem)\n");
+			mod_timer(&unattended_timer,
+						jiffies + msecs_to_jiffies(PM_UNATTENDED_TIMEOUT));
+		}
 		if (state == PM_SUSPEND_MEM)
 			state = mem_sleep_current;
 
@@ -512,6 +664,32 @@ static ssize_t state_store(struct kobject *kobj, struct kobj_attribute *attr,
 }
 
 power_attr(state);
+
+static ssize_t unattended_timer_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
+{
+	printk("[PM]unattended_timer : unattended_timer_show \n");
+	return 0;
+}
+
+static ssize_t unattended_timer_store(struct kobject *kobj,
+										struct kobj_attribute *attr, const char *buf, size_t n)
+{
+	printk("[PM]unattended_timer : unattended_timer_store\n");
+
+	if (strcmp(buf, "pre-mem") == 0) {
+		printk("[PM]unattended_timer: mod_timer(unattended_timer_store pre-mem)\n");
+		mod_timer(&unattended_timer, jiffies + msecs_to_jiffies(PM_UNATTENDED_TIMEOUT));
+	}
+	else {
+		printk("[PM]unattended_timer: del_timer(unattended_timer_store on\n");
+		del_timer(&unattended_timer);
+		pm_stay_unattended_period =0;
+	}
+
+	return 0;
+}
+
+power_attr(unattended_timer);
 
 #ifdef CONFIG_PM_SLEEP
 /*
@@ -639,6 +817,11 @@ static ssize_t wake_lock_store(struct kobject *kobj,
 			       const char *buf, size_t n)
 {
 	int error = pm_wake_lock(buf);
+	int ret = strcmp(buf,"PowerManager.SuspendLockout");
+	if(0 == ret) {
+		printk("[PM]request_suspend_state: (3->0)\n");
+		ASUSEvtlog("[PM]request_suspend_state: (3->0)\n");
+	}
 	return error ? error : n;
 }
 
@@ -656,6 +839,14 @@ static ssize_t wake_unlock_store(struct kobject *kobj,
 				 const char *buf, size_t n)
 {
 	int error = pm_wake_unlock(buf);
+	int ret = strcmp(buf,"PowerManager.SuspendLockout");
+	if(0 == ret) {
+		printk("[PM]unattended_timer: mod_timer(%s SuspendLockout)\n",__func__);
+		mod_timer(&unattended_timer, jiffies + msecs_to_jiffies(PM_UNATTENDED_TIMEOUT));
+
+		printk("[PM]request_suspend_state: (0->3)\n");
+		ASUSEvtlog("[PM]request_suspend_state: (0->3)\n");
+	}
 	return error ? error : n;
 }
 
@@ -729,6 +920,7 @@ power_attr(pm_freeze_timeout);
 
 static struct attribute * g[] = {
 	&state_attr.attr,
+	&unattended_timer_attr.attr,
 #ifdef CONFIG_PM_TRACE
 	&pm_trace_attr.attr,
 	&pm_trace_dev_match_attr.attr,
@@ -763,6 +955,14 @@ static const struct attribute_group attr_group = {
 	.attrs = g,
 };
 
+static const struct attribute_group *attr_groups[] = {
+	&attr_group,
+#ifdef CONFIG_PM_SLEEP
+	&suspend_attr_group,
+#endif
+	NULL,
+};
+
 struct workqueue_struct *pm_wq;
 EXPORT_SYMBOL_GPL(pm_wq);
 
@@ -775,7 +975,38 @@ static int __init pm_start_workqueue(void)
 
 static int __init pm_init(void)
 {
-	int error = pm_start_workqueue();
+	int ret, error;
+
+	pmsp_dev.fnode_name = "PowerManagerServicePrinter";
+	pmsp_dev.supported_cable  = pmsp_supported_cable;
+	pmsp_logcat_dev.fnode_name = "PowerManagerWakelocksPointer";
+	pmsp_logcat_dev.supported_cable  = pmsp_supported_cable;
+	INIT_WORK(&pms_printer, pms_printer_func);
+	ret = extcon_dev_register(&pmsp_dev);
+
+	if (ret < 0)
+		printk("[PM] %s:fail to register switch power_manager_printer \n",__func__);
+	else
+		printk("[PM] %s:success to register pmsp switch \n",__func__);
+
+	ret = extcon_dev_register(&pmsp_logcat_dev);
+
+	if (ret < 0)
+		printk("[PM] %s:fail to register switch power_manager_printer_logcat \n",__func__);
+	else
+		printk("[PM] %s:success to register pmsp_logcat switch \n",__func__);
+
+	pm_dumpthread_dev.fnode_name = "UnattendedTimerDumpBusyThread";
+	pm_dumpthread_dev.supported_cable  = pmsp_supported_cable;
+	INIT_WORK(&pm_cpuinfo_printer, pm_cpuinfo_func);
+	ret = extcon_dev_register(&pm_dumpthread_dev);
+
+	if (ret < 0)
+		printk("[PM] %s:fail to register switch device pm_dumpthread_dev\n",__func__);
+	else
+		printk("[PM] %s:success to register switch device pm_dumpthread_dev\n",__func__);
+
+	error = pm_start_workqueue();
 	if (error)
 		return error;
 	hibernate_image_size_init();
@@ -784,7 +1015,7 @@ static int __init pm_init(void)
 	power_kobj = kobject_create_and_add("power", NULL);
 	if (!power_kobj)
 		return -ENOMEM;
-	error = sysfs_create_group(power_kobj, &attr_group);
+	error = sysfs_create_groups(power_kobj, attr_groups);
 	if (error)
 		return error;
 	pm_print_times_init();

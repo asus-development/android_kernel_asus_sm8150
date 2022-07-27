@@ -42,6 +42,9 @@
 /* walk all threaded css_sets in the domain */
 #define CSS_TASK_ITER_THREADED		(1U << 1)
 
+/* internal flags */
+#define CSS_TASK_ITER_SKIPPED		(1U << 16)
+
 /* a css_task_iter should be treated as an opaque object */
 struct css_task_iter {
 	struct cgroup_subsys		*ss;
@@ -56,12 +59,37 @@ struct css_task_iter {
 	struct list_head		*task_pos;
 	struct list_head		*tasks_head;
 	struct list_head		*mg_tasks_head;
+	struct list_head		*dying_tasks_head;
 
 	struct css_set			*cur_cset;
 	struct css_set			*cur_dcset;
 	struct task_struct		*cur_task;
 	struct list_head		iters_node;	/* css_set->task_iters */
 };
+#ifdef CONFIG_CGF_NOTIFY_EVENT
+#define FREEZER_SS_NAME	"freezer"
+#define	FREEZER_KN_NAME	""
+#define	FREEZER_BG_KN_NAME	"frozen"
+struct cgf_event {
+     int type;
+	struct signal_struct *info;
+	void *data;
+};
+struct freezer {
+	struct cgroup_subsys_state	css;
+	struct notifier_block	nf;
+	struct cgf_event	event;
+	struct workqueue_struct *cgf_notify_wq;
+	struct work_struct	cgf_notify_work;
+	unsigned int		state;
+	spinlock_t		lock;
+};
+extern int cgf_register_notifier(struct notifier_block *nb);
+extern int cgf_unregister_notifier(struct notifier_block *nb);
+extern int cgf_notifier_call_chain(unsigned long val, void *v);
+extern int cgf_attach_task_group(struct cgroup *cgrp, u64 pid);
+#endif
+
 
 extern struct cgroup_root cgrp_dfl_root;
 extern struct css_set init_css_set;
@@ -484,7 +512,7 @@ static inline struct cgroup_subsys_state *task_css(struct task_struct *task,
  *
  * Find the css for the (@task, @subsys_id) combination, increment a
  * reference on and return it.  This function is guaranteed to return a
- * valid css.
+ * valid css.  The returned css may already have been offlined.
  */
 static inline struct cgroup_subsys_state *
 task_get_css(struct task_struct *task, int subsys_id)
@@ -494,7 +522,13 @@ task_get_css(struct task_struct *task, int subsys_id)
 	rcu_read_lock();
 	while (true) {
 		css = task_css(task, subsys_id);
-		if (likely(css_tryget_online(css)))
+		/*
+		 * Can't use css_tryget_online() here.  A task which has
+		 * PF_EXITING set may stay associated with an offline css.
+		 * If such task calls this function, css_tryget_online()
+		 * will keep failing.
+		 */
+		if (likely(css_tryget(css)))
 			break;
 		cpu_relax();
 	}

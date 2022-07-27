@@ -174,6 +174,7 @@ struct dsi_panel {
 	struct mipi_dsi_device mipi_device;
 
 	struct mutex panel_lock;
+	struct mutex bl_lock;
 	struct drm_panel drm_panel;
 	struct mipi_dsi_host *host;
 	struct device *parent;
@@ -217,6 +218,11 @@ struct dsi_panel {
 	bool sync_broadcast_en;
 	int power_mode;
 	enum dsi_panel_physical_type panel_type;
+
+	// for early backlight
+	u32 early_bl_level;
+	struct workqueue_struct *early_bl_workqueue;
+	struct work_struct early_bl_work;
 };
 
 static inline bool dsi_panel_ulps_feature_enabled(struct dsi_panel *panel)
@@ -336,8 +342,5 @@ struct dsi_panel *dsi_panel_ext_bridge_get(struct device *parent,
 int dsi_panel_parse_esd_reg_read_configs(struct dsi_panel *panel);
 
 void dsi_panel_ext_bridge_put(struct dsi_panel *panel);
-
-void dsi_panel_calc_dsi_transfer_time(struct dsi_host_common_cfg *config,
-		struct dsi_display_mode *mode, u32 frame_threshold_us);
 
 #endif /* _DSI_PANEL_H_ */

@@ -537,6 +537,8 @@ static int mhi_pm_mission_mode_transition(struct mhi_controller *mhi_cntrl)
 	if (MHI_REG_ACCESS_VALID(mhi_cntrl->pm_state))
 		mhi_timesync_log(mhi_cntrl);
 
+	mhi_special_events_pending(mhi_cntrl);
+
 	/* setup sysfs nodes for userspace votes */
 	mhi_create_sysfs(mhi_cntrl);
 
