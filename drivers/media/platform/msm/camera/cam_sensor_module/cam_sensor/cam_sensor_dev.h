@@ -99,7 +99,6 @@ struct intf_params {
  * @pipeline_delay: Sensor pipeline delay
  */
 struct cam_sensor_ctrl_t {
-	char device_name[CAM_CTX_DEV_NAME_MAX_LENGTH];
 	struct platform_device *pdev;
 	struct cam_hw_soc_info soc_info;
 	struct mutex cam_sensor_mutex;
@@ -108,6 +107,7 @@ struct cam_sensor_ctrl_t {
 	enum cci_device_num cci_num;
 	struct camera_io_master io_master_info;
 	enum cam_sensor_state_t sensor_state;
+	uint8_t power_state;//ASUS_BSP Zhengwei "porting sensor ATD"
 	uint8_t is_probe_succeed;
 	uint32_t id;
 	struct device_node *of_node;
@@ -117,6 +117,7 @@ struct cam_sensor_ctrl_t {
 	struct i2c_data_settings i2c_data;
 	struct  cam_sensor_query_cap sensor_info;
 	struct intf_params bridge_intf;
+	char device_name[20];
 	uint32_t streamon_count;
 	uint32_t streamoff_count;
 	int bob_reg_index;

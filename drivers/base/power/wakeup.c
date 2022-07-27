@@ -25,6 +25,14 @@
 
 #include "power.h"
 
+extern int pmsp_flag;
+extern int pm_stay_unattended_period;
+extern void pmsp_print(void);
+extern void print_pm_cpuinfo(void);
+//ASUS_BSP +++ [PM]Extern this flag to check dpm_suspend has been callback for resume_console
+extern unsigned int pm_pwrcs_ret;
+//ASUS_BSP --- [PM]Extern this flag to check dpm_suspend has been callback for resume_console
+
 #ifndef CONFIG_SUSPEND
 suspend_state_t pm_suspend_target_state;
 #define pm_suspend_target_state	(PM_SUSPEND_ON)
@@ -919,6 +927,43 @@ void pm_print_active_wakeup_sources(void)
 }
 EXPORT_SYMBOL_GPL(pm_print_active_wakeup_sources);
 
+void asus_uts_print_active_locks(void)
+{
+	struct wakeup_source *ws;
+	int wl_active_cnt = 0;
+	int srcuidx;
+
+	srcuidx = srcu_read_lock(&wakeup_srcu);
+	list_for_each_entry_rcu(ws, &wakeup_sources, entry) {
+		if (ws->active) {
+			wl_active_cnt++;
+			printk("[PM] active wake lock %s\n", ws->name);
+			ASUSEvtlog("[PM] active wake lock: %s\n", ws->name);
+
+			if (pmsp_flag == 1) {
+				pmsp_print();
+				printk("[PM] pm_stay_unattended_period: %d\n",
+						pm_stay_unattended_period);
+
+				if( pm_stay_unattended_period >= PM_UNATTENDED_TIMEOUT * 3 ) {
+					pm_stay_unattended_period = 0;
+					print_pm_cpuinfo();
+				}
+			}
+			 pmsp_flag = 0;
+		}
+	}
+
+	if (wl_active_cnt == 0) {
+		printk("[PM] all wakelock are inactive\n");
+		ASUSEvtlog("[PM] all wakelock are inactive\n");
+	}
+
+	srcu_read_unlock(&wakeup_srcu, srcuidx);
+	return;
+}
+EXPORT_SYMBOL(asus_uts_print_active_locks);
+
 /**
  * pm_wakeup_pending - Check if power transition in progress should be aborted.
  *
@@ -987,7 +1032,9 @@ void pm_system_irq_wakeup(unsigned int irq_number)
 
 			pr_warn("%s: %d triggered %s\n", __func__,
 					irq_number, name);
-
+			//ASUSEvtlog("[PM] IRQs triggered: %d %s\n", irq_number, name);
+			//log_wakeup_reason(irq_number);
+			pm_pwrcs_ret = 0; //Don't print gic_show_resume_irq to ASUSEvtlog if here already shows
 		}
 		pm_wakeup_irq = irq_number;
 		pm_system_wakeup();

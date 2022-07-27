@@ -285,6 +285,10 @@ fail:
 	return ret;
 }
 
+//[CR] Support to trace Subsystem voting status
+static phys_addr_t g_phys_addr_base = 0;
+static u32 g_phys_size = 0;
+
 static int msm_rpmstats_probe(struct platform_device *pdev)
 {
 	struct msm_rpmstats_platform_data *pdata;
@@ -315,8 +319,8 @@ static int msm_rpmstats_probe(struct platform_device *pdev)
 		iounmap(phys_ptr);
 	}
 
-	pdata->phys_addr_base  = res->start + offset_addr;
-	pdata->phys_size = resource_size(res);
+	g_phys_addr_base = pdata->phys_addr_base  = res->start + offset_addr;
+	g_phys_size = pdata->phys_size = resource_size(res);
 
 	key = "qcom,num-records";
 	if (of_property_read_u32(pdev->dev.of_node, key, &pdata->num_records))
@@ -344,11 +348,76 @@ static int msm_rpmstats_remove(struct platform_device *pdev)
 
 	return 0;
 }
+//[CR] ++Support to trace Subsystem voting status
+#ifdef CONFIG_PM_SLEEP
+
+static int rpm_stats_suspend(struct device *dev)
+{
+	void __iomem *reg =0;
+	struct msm_rpm_stats_data data;
+	char stat_type[5];
+	int i;
+
+	stat_type[4] = 0;
+
+	reg = ioremap_nocache(g_phys_addr_base, g_phys_size);
+	if(!reg) {
+		return 0;
+	}
+	/* Print aosd and cxsd */
+	for (i = 0; i < 2; i++) {
+		data.stat_type = msm_rpmstats_read_long_register(reg, i,
+				offsetof(struct msm_rpm_stats_data, stat_type));
+		data.count = msm_rpmstats_read_long_register(reg, i,
+				offsetof(struct msm_rpm_stats_data, count));
+		memcpy(stat_type, &data.stat_type, sizeof(u32));
+		printk("[RPM] Suspend: status: Mode: %s, Count: %d\n", stat_type, data.count);
+	}
+
+	iounmap(reg);
+	return 0;
+}
+
+static int rpm_stats_resume(struct device *dev)
+{
+	void __iomem *reg =0;
+	struct msm_rpm_stats_data data;
+	char stat_type[5];
+	int i;
+	stat_type[4] = 0;
+
+	reg = ioremap_nocache(g_phys_addr_base, g_phys_size);
+	if(!reg) {
+		return 0;
+	}
+	/* Print aosd and cxsd */
+	for (i = 0; i < 2; i++) {
+		data.stat_type = msm_rpmstats_read_long_register(reg, i,
+				offsetof(struct msm_rpm_stats_data, stat_type));
+		data.count = msm_rpmstats_read_long_register(reg, i,
+				offsetof(struct msm_rpm_stats_data, count));
+		memcpy(stat_type, &data.stat_type, sizeof(u32));
+		printk("[RPM] Resume: status: Mode: %s, Count: %d\n", stat_type, data.count);
+	}
+
+	iounmap(reg);
+	return 0;
+}
+
+#endif
+//[CR] --Support to trace Subsystem voting status
+
 
 
 static const struct of_device_id rpm_stats_table[] = {
 	{ .compatible = "qcom,rpm-stats" },
 	{ },
+};
+
+//[CR] Support to trace Subsystem voting status
+static const struct dev_pm_ops rpm_stats_pm_ops = {
+	.suspend	= rpm_stats_suspend,
+	.resume		= rpm_stats_resume,
 };
 
 static struct platform_driver msm_rpmstats_driver = {
@@ -358,6 +427,7 @@ static struct platform_driver msm_rpmstats_driver = {
 		.name = "msm_rpm_stat",
 		.owner = THIS_MODULE,
 		.of_match_table = rpm_stats_table,
+		.pm	= &rpm_stats_pm_ops,
 	},
 };
 builtin_platform_driver(msm_rpmstats_driver);

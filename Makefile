@@ -725,6 +725,10 @@ ifeq ($(shell $(CONFIG_SHELL) $(srctree)/scripts/gcc-goto.sh $(CC) $(KBUILD_CFLA
 	KBUILD_AFLAGS += -DCC_HAVE_ASM_GOTO
 endif
 
+ASUS_BUILD_NUMBER := $(shell cat $(srctree)/../../out/soong/build_number.txt)
+$(warning ASUS_BUILD_NUMBER: $(ASUS_BUILD_NUMBER))
+KBUILD_CPPFLAGS += -DASUS_SW_VER=\"$(TARGET_SKU)-$(ASUS_BUILD_NUMBER)\"
+
 include scripts/Makefile.kcov
 include scripts/Makefile.gcc-plugins
 
@@ -994,6 +998,15 @@ include scripts/Makefile.ubsan
 KBUILD_CPPFLAGS += $(ARCH_CPPFLAGS) $(KCPPFLAGS)
 KBUILD_AFLAGS   += $(ARCH_AFLAGS)   $(KAFLAGS)
 KBUILD_CFLAGS   += $(ARCH_CFLAGS)   $(KCFLAGS)
+
+# Add ASUS build option to KBUILD_CPPFLAGS
+ifdef CONFIG_ASUS_USERDEBUG_BUILD
+KBUILD_CPPFLAGS += -DASUS_USERDEBUG_BUILD=1
+endif
+
+ifdef CONFIG_ASUS_USER_BUILD
+KBUILD_CPPFLAGS += -DASUS_USER_BUILD=1
+endif
 
 # Use --build-id when available.
 LDFLAGS_BUILD_ID := $(patsubst -Wl$(comma)%,%,\

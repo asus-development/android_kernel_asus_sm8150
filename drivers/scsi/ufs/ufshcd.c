@@ -44,6 +44,7 @@
 #include <linux/of.h>
 #include <linux/blkdev.h>
 #include <asm/unaligned.h>
+#include <scsi/fc_frame.h>	//ASUS_Deeo : include to use ntohll API +++
 
 #include "ufshcd.h"
 #include "ufs_quirks.h"
@@ -53,6 +54,12 @@
 
 #ifdef CONFIG_DEBUG_FS
 
+static  u8 pre_Pre_EOL;
+static  u8 pre_life_time_A;
+static  u8 pre_life_time_B;
+char* ufs_vendor;
+char* ufs_spec_ver;
+static bool init_ufs_health_flag = false;
 static int ufshcd_tag_req_type(struct request *rq)
 {
 	int rq_type = TS_WRITE;
@@ -481,6 +488,7 @@ static int ufshcd_config_vreg(struct device *dev,
 		struct ufs_vreg *vreg, bool on);
 static int ufshcd_enable_vreg(struct device *dev, struct ufs_vreg *vreg);
 static int ufshcd_disable_vreg(struct device *dev, struct ufs_vreg *vreg);
+static void ufs_asusevent_log(struct ufs_hba *hba);
 
 #if IS_ENABLED(CONFIG_DEVFREQ_GOV_SIMPLE_ONDEMAND)
 static struct devfreq_simple_ondemand_data ufshcd_ondemand_data = {
@@ -4175,6 +4183,7 @@ int ufshcd_query_flag(struct ufs_hba *hba, enum query_opcode opcode,
 	int timeout = QUERY_REQ_TIMEOUT;
 
 	BUG_ON(!hba);
+	printk("[UFS] ufshcd_query_flag : opcode 0x%x, flag_idn 0x%x\n", opcode, idn);
 
 	ufshcd_hold_all(hba);
 	mutex_lock(&hba->dev_cmd.lock);
@@ -4244,6 +4253,8 @@ int ufshcd_query_attr(struct ufs_hba *hba, enum query_opcode opcode,
 
 	BUG_ON(!hba);
 
+	if(opcode != UPIU_QUERY_OPCODE_READ_ATTR || idn != QUERY_ATTR_IDN_BKOPS_STATUS)
+	printk("[UFS] ufshcd_query_attr : opcode 0x%x, attr_idn 0x%x, index 0x%x\n", opcode, idn, index);
 	ufshcd_hold_all(hba);
 	if (!attr_val) {
 		dev_err(hba->dev, "%s: attribute value required for opcode 0x%x\n",
@@ -4415,6 +4426,7 @@ int ufshcd_query_descriptor_retry(struct ufs_hba *hba,
 	int err;
 	int retries;
 
+	printk("[UFS] ufshcd_query_descriptor : opcode 0x%x, desc_idn 0x%x, index 0x%x\n", opcode, idn, index);
 	for (retries = QUERY_REQ_RETRIES; retries > 0; retries--) {
 		err = __ufshcd_query_descriptor(hba, opcode, idn, index,
 						selector, desc_buf, buf_len);
@@ -4615,6 +4627,22 @@ int ufshcd_read_device_desc(struct ufs_hba *hba, u8 *buf, u32 size)
 {
 	return ufshcd_read_desc(hba, QUERY_DESC_IDN_DEVICE, 0, buf, size);
 }
+//ASUS_BSP Deeo : dump all desc +++
+int ufshcd_read_geometry_desc(struct ufs_hba *hba, u8 *buf, u32 size)
+{
+	return ufshcd_read_desc(hba, QUERY_DESC_IDN_GEOMETRY, 0, buf, size);
+}
+
+int ufshcd_read_unit_desc(struct ufs_hba *hba, int desc_index, u8 *buf, u32 size)
+{
+	return ufshcd_read_desc(hba, QUERY_DESC_IDN_UNIT, desc_index, buf, size);
+}
+
+int ufshcd_read_health_desc(struct ufs_hba *hba, u8 *buf, u32 size)
+{
+	return ufshcd_read_desc(hba, QUERY_DESC_IDN_HEALTH, 0, buf, size);
+}
+//ASUS_BSP Deeo : dump all desc ---
 
 /**
  * ufshcd_read_string_desc - read string descriptor
@@ -4627,7 +4655,7 @@ int ufshcd_read_device_desc(struct ufs_hba *hba, u8 *buf, u32 size)
  * Return 0 in case of success, non-zero otherwise
  */
 #define ASCII_STD true
-static int ufshcd_read_string_desc(struct ufs_hba *hba, int desc_index,
+int ufshcd_read_string_desc(struct ufs_hba *hba, int desc_index,
 				   u8 *buf, u32 size, bool ascii)
 {
 	int err = 0;
@@ -8890,6 +8918,7 @@ reinit:
 		pm_runtime_put_sync(hba->dev);
 	}
 
+	ufs_asusevent_log(hba);
 	/*
 	 * Enable auto hibern8 if supported, after full host and
 	 * device initialization.
@@ -10497,6 +10526,8 @@ int ufshcd_system_resume(struct ufs_hba *hba)
 		goto out;
 	else
 		ret = ufshcd_resume(hba, UFS_SYSTEM_PM);
+	ufs_asusevent_log(hba);
+
 out:
 	trace_ufshcd_system_resume(dev_name(hba->dev), ret,
 		ktime_to_us(ktime_sub(ktime_get(), start)),
@@ -10754,6 +10785,292 @@ static void ufshcd_add_spm_lvl_sysfs_nodes(struct ufs_hba *hba)
 		dev_err(hba->dev, "Failed to create sysfs for spm_lvl\n");
 }
 
+//ASUS_BSP Deeo : Get UFS info +++
+static bool init_flag = false;
+
+static struct {
+	u32 manfid;
+	char *band_type;
+} ufs_vendor_tbl[] = {
+	{ 0x1AD, "HYNIX" },
+	{ 0x1CE, "SAMSUNG" },
+	{ 0x198, "TOSHIBA" },
+};
+#define UFS_VENDOR_TBL_MAX	(sizeof(ufs_vendor_tbl)/sizeof(ufs_vendor_tbl[0]))
+
+static void get_ufs_size(struct ufs_hba *hba)
+{
+	int err=0;
+	int buff_len = QUERY_DESC_GEOMETRY_DEF_SIZE;
+	u8 desc_buf[QUERY_DESC_GEOMETRY_DEF_SIZE];
+
+	pm_runtime_get_sync(hba->dev);
+	err = ufshcd_read_geometry_desc(hba, desc_buf, buff_len);
+	pm_runtime_put_sync(hba->dev);
+
+	hba->ufs_size = ntohll(*(u64 *)&desc_buf[0x4]);
+
+	if(hba->ufs_size > 0x30000000)
+		sprintf(hba->ufs_total_size, "512");
+	else if(hba->ufs_size > 0x10000000)
+		sprintf(hba->ufs_total_size, "256");
+	else if(hba->ufs_size > 0xe000000)
+		sprintf(hba->ufs_total_size, "128");
+	else if(hba->ufs_size > 0x7000000)
+		sprintf(hba->ufs_total_size, "64");
+	else if(hba->ufs_size > 0x3000000)
+		sprintf(hba->ufs_total_size, "32");
+	else
+		sprintf(hba->ufs_total_size, "16");
+
+	init_flag = true;
+
+	return;
+}
+
+static int get_ufs_health(struct ufs_hba *hba, u8 index)
+{
+	int err=0;
+	int buff_len = QUERY_DESC_HEALTH_DEF_SIZE;
+	u8 desc_buf[QUERY_DESC_HEALTH_DEF_SIZE];
+
+	printk("[UFS] get_ufs_health : 0x%x\n", index);
+	pm_runtime_get_sync(hba->dev);
+	err = ufshcd_read_health_desc(hba, desc_buf, buff_len);
+	pm_runtime_put_sync(hba->dev);
+
+	return (u8)desc_buf[index];
+}
+
+static void get_ufs_status(struct ufs_hba *hba)
+{
+	int err=0, i;
+	int buff_len = QUERY_DESC_DEVICE_DEF_SIZE;
+	u8 desc_buf[QUERY_DESC_DEVICE_DEF_SIZE];
+	int manfid, spec_ver;
+
+	pm_runtime_get_sync(hba->dev);
+	err = ufshcd_read_device_desc(hba, desc_buf, buff_len);
+	pm_runtime_put_sync(hba->dev);
+
+	manfid = ntohs(*(u16 *)&desc_buf[0x18]);
+	printk("[UFS] manfid : 0x%x\n", manfid);
+
+	spec_ver = ntohs(*(u16 *)&desc_buf[0x10]);
+	printk("[UFS] spec_ver : 0x%x\n", spec_ver);
+
+	memset(hba->ufs_status, 0, sizeof(hba->ufs_status));
+
+	for (i = 0; i < UFS_VENDOR_TBL_MAX; i++) {
+		if (manfid == ufs_vendor_tbl[i].manfid) {
+			strcpy(hba->ufs_status, ufs_vendor_tbl[i].band_type);
+			if(!init_ufs_health_flag)
+				ufs_vendor=ufs_vendor_tbl[i].band_type;
+
+			if (spec_ver == 0x200){
+				strcat(hba->ufs_status, "-v2.0-");
+				ufs_spec_ver = "v2.0";
+			}
+			else if (spec_ver == 0x210){
+				strcat(hba->ufs_status, "-v2.1-");
+				ufs_spec_ver = "v2.1";
+			}
+
+			if(!init_flag)
+				get_ufs_size(hba);
+
+			strcat(hba->ufs_status, hba->ufs_total_size);
+			strcat(hba->ufs_status, "G");
+
+			return;
+		}
+	}
+
+	strcpy(hba->ufs_status, "Unknown");
+	return;
+}
+
+static ssize_t ufshcd_ufs_total_size_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	struct ufs_hba *hba = dev_get_drvdata(dev);
+	int curr_len;
+
+	if(!init_flag)
+		get_ufs_size(hba);
+
+	curr_len = snprintf(buf, PAGE_SIZE,"%s\n", hba->ufs_total_size);
+	return curr_len;
+}
+
+static ssize_t ufshcd_ufs_total_size_store(struct device *dev,
+		struct device_attribute *attr, const char *buf, size_t count)
+{
+	return count;
+}
+
+static void ufshcd_add_ufs_total_size_sysfs_nodes(struct ufs_hba *hba)
+{
+	hba->ufs_total_size_attr.show = ufshcd_ufs_total_size_show;
+	hba->ufs_total_size_attr.store = ufshcd_ufs_total_size_store;
+	sysfs_attr_init(&hba->ufs_total_size_attr.attr);
+	hba->ufs_total_size_attr.attr.name = "ufs_total_size";
+	hba->ufs_total_size_attr.attr.mode = S_IRUGO | S_IWUSR;
+	if (device_create_file(hba->dev, &hba->ufs_total_size_attr))
+		dev_err(hba->dev, "Failed to create sysfs for ufs_total_size\n");
+}
+
+static ssize_t ufshcd_ufs_size_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	struct ufs_hba *hba = dev_get_drvdata(dev);
+	int curr_len;
+
+	if(!init_flag)
+		get_ufs_size(hba);
+
+	curr_len = snprintf(buf, PAGE_SIZE,"0x%llx\n", hba->ufs_size);
+
+	return curr_len;
+}
+
+static ssize_t ufshcd_ufs_size_store(struct device *dev,
+		struct device_attribute *attr, const char *buf, size_t count)
+{
+	return count;
+}
+
+static void ufshcd_add_ufs_size_sysfs_nodes(struct ufs_hba *hba)
+{
+	hba->ufs_size_attr.show = ufshcd_ufs_size_show;
+	hba->ufs_size_attr.store = ufshcd_ufs_size_store;
+	sysfs_attr_init(&hba->ufs_size_attr.attr);
+	hba->ufs_size_attr.attr.name = "ufs_size";
+	hba->ufs_size_attr.attr.mode = S_IRUGO | S_IWUSR;
+	if (device_create_file(hba->dev, &hba->ufs_size_attr))
+		dev_err(hba->dev, "Failed to create sysfs for ufs_size\n");
+}
+
+static ssize_t ufshcd_ufs_preEOL_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	struct ufs_hba *hba = dev_get_drvdata(dev);
+	int curr_len;
+	u8 index = 0x02, val;
+
+	val = get_ufs_health(hba, index);
+
+	curr_len = snprintf(buf, PAGE_SIZE,"0x%02x\n", val);
+	return curr_len;
+}
+
+static ssize_t ufshcd_ufs_preEOL_store(struct device *dev,
+		struct device_attribute *attr, const char *buf, size_t count)
+{
+	return count;
+}
+
+static void ufshcd_add_ufs_preEOL_sysfs_nodes(struct ufs_hba *hba)
+{
+	hba->ufs_preEOL_attr.show = ufshcd_ufs_preEOL_show;
+	hba->ufs_preEOL_attr.store = ufshcd_ufs_preEOL_store;
+	sysfs_attr_init(&hba->ufs_preEOL_attr.attr);
+	hba->ufs_preEOL_attr.attr.name = "ufs_preEOL";
+	hba->ufs_preEOL_attr.attr.mode = S_IRUGO | S_IWUSR;
+	if (device_create_file(hba->dev, &hba->ufs_preEOL_attr))
+		dev_err(hba->dev, "Failed to create sysfs for ufs_preEOL\n");
+}
+
+static ssize_t ufshcd_ufs_health_A_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	struct ufs_hba *hba = dev_get_drvdata(dev);
+	int curr_len;
+	u8 index = 0x03, val;
+
+	val = get_ufs_health(hba, index);
+
+	curr_len = snprintf(buf, PAGE_SIZE,"0x%02x\n", val);
+	return curr_len;
+}
+
+static ssize_t ufshcd_ufs_health_A_store(struct device *dev,
+		struct device_attribute *attr, const char *buf, size_t count)
+{
+	return count;
+}
+
+static void ufshcd_add_ufs_health_A_sysfs_nodes(struct ufs_hba *hba)
+{
+	hba->ufs_health_A_attr.show = ufshcd_ufs_health_A_show;
+	hba->ufs_health_A_attr.store = ufshcd_ufs_health_A_store;
+	sysfs_attr_init(&hba->ufs_health_A_attr.attr);
+	hba->ufs_health_A_attr.attr.name = "ufs_health_A";
+	hba->ufs_health_A_attr.attr.mode = S_IRUGO | S_IWUSR;
+	if (device_create_file(hba->dev, &hba->ufs_health_A_attr))
+		dev_err(hba->dev, "Failed to create sysfs for ufs_health_A_attr\n");
+}
+
+static ssize_t ufshcd_ufs_health_B_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	struct ufs_hba *hba = dev_get_drvdata(dev);
+	int curr_len;
+	u8 index = 0x04, val;
+
+	val = get_ufs_health(hba, index);
+
+	curr_len = snprintf(buf, PAGE_SIZE,"0x%02x\n", val);
+	return curr_len;
+}
+
+static ssize_t ufshcd_ufs_health_B_store(struct device *dev,
+		struct device_attribute *attr, const char *buf, size_t count)
+{
+	return count;
+}
+
+static void ufshcd_add_ufs_health_B_sysfs_nodes(struct ufs_hba *hba)
+{
+	hba->ufs_health_B_attr.show = ufshcd_ufs_health_B_show;
+	hba->ufs_health_B_attr.store = ufshcd_ufs_health_B_store;
+	sysfs_attr_init(&hba->ufs_health_B_attr.attr);
+	hba->ufs_health_B_attr.attr.name = "ufs_health_B";
+	hba->ufs_health_B_attr.attr.mode = S_IRUGO | S_IWUSR;
+	if (device_create_file(hba->dev, &hba->ufs_health_B_attr))
+		dev_err(hba->dev, "Failed to create sysfs for ufs_health_B_attr\n");
+}
+
+static ssize_t ufshcd_ufs_status_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	struct ufs_hba *hba = dev_get_drvdata(dev);
+	int curr_len;
+
+	get_ufs_status(hba);
+
+	curr_len = snprintf(buf, PAGE_SIZE,"%s\n", hba->ufs_status);
+	return curr_len;
+}
+
+static ssize_t ufshcd_ufs_status_store(struct device *dev,
+		struct device_attribute *attr, const char *buf, size_t count)
+{
+	return count;
+}
+
+static void ufshcd_add_ufs_status_sysfs_nodes(struct ufs_hba *hba)
+{
+	hba->ufs_status_attr.show = ufshcd_ufs_status_show;
+	hba->ufs_status_attr.store = ufshcd_ufs_status_store;
+	sysfs_attr_init(&hba->ufs_status_attr.attr);
+	hba->ufs_status_attr.attr.name = "ufs_status";
+	hba->ufs_status_attr.attr.mode = S_IRUGO | S_IWUSR;
+	if (device_create_file(hba->dev, &hba->ufs_status_attr))
+		dev_err(hba->dev, "Failed to create sysfs for ufs_status_attr\n");
+}
+//ASUS_BSP Deeo : Get UFS info ---
+
 static ssize_t ufs_sysfs_read_desc_param(struct ufs_hba *hba,
 				  enum desc_idn desc_id,
 				  u8 desc_index,
@@ -10852,6 +11169,14 @@ static inline void ufshcd_add_sysfs_nodes(struct ufs_hba *hba)
 	ufshcd_add_rpm_lvl_sysfs_nodes(hba);
 	ufshcd_add_spm_lvl_sysfs_nodes(hba);
 	ufshcd_add_desc_sysfs_nodes(hba->dev);
+	//ASUS_BSP Deeo : Get UFS info +++
+	ufshcd_add_ufs_total_size_sysfs_nodes(hba);
+	ufshcd_add_ufs_size_sysfs_nodes(hba);
+	ufshcd_add_ufs_preEOL_sysfs_nodes(hba);
+	ufshcd_add_ufs_health_A_sysfs_nodes(hba);
+	ufshcd_add_ufs_health_B_sysfs_nodes(hba);
+	ufshcd_add_ufs_status_sysfs_nodes(hba);
+	//ASUS_BSP Deeo : Get UFS info ---
 }
 
 static inline void ufshcd_remove_sysfs_nodes(struct ufs_hba *hba)
@@ -10859,6 +11184,12 @@ static inline void ufshcd_remove_sysfs_nodes(struct ufs_hba *hba)
 	device_remove_file(hba->dev, &hba->rpm_lvl_attr);
 	device_remove_file(hba->dev, &hba->spm_lvl_attr);
 	ufshcd_remove_desc_sysfs_nodes(hba->dev);
+	device_remove_file(hba->dev, &hba->ufs_total_size_attr);
+	device_remove_file(hba->dev, &hba->ufs_size_attr);
+	device_remove_file(hba->dev, &hba->ufs_preEOL_attr);
+	device_remove_file(hba->dev, &hba->ufs_health_A_attr);
+	device_remove_file(hba->dev, &hba->ufs_health_B_attr);
+	device_remove_file(hba->dev, &hba->ufs_status_attr); 
 }
 
 static void __ufshcd_shutdown_clkscaling(struct ufs_hba *hba)
@@ -11085,6 +11416,57 @@ out_error:
 }
 EXPORT_SYMBOL(ufshcd_alloc_host);
 
+static void ufs_asusevent_log(struct ufs_hba *hba)
+{
+	int err = 0;
+        int buff_len = QUERY_DESC_HEALTH_DEF_SIZE;
+        u8 desc_buf[QUERY_DESC_HEALTH_DEF_SIZE];
+
+	u8 model_index;
+	int buff_len_2 = QUERY_DESC_DEVICE_DEF_SIZE;
+	u8 desc_buf_2[QUERY_DESC_DEVICE_DEF_SIZE];
+	u8 str_desc_buf[QUERY_DESC_STRING_DEF_SIZE + 1];
+
+        pm_runtime_get_sync(hba->dev);
+        err = ufshcd_read_health_desc(hba, desc_buf, buff_len);
+	if(err){
+		pr_info("ufs_asusevent_log get health failed");
+		return ;
+	}
+        pm_runtime_put_sync(hba->dev);
+
+//===get ufs fw version===
+	pm_runtime_get_sync(hba->dev);
+	err = ufshcd_read_device_desc(hba, desc_buf_2, buff_len_2);
+	pm_runtime_put_sync(hba->dev);
+
+	model_index=desc_buf_2[0x2A];	// REV
+
+	pm_runtime_get_sync(hba->dev);
+	err = ufshcd_read_string_desc(hba, model_index, str_desc_buf,
+					QUERY_DESC_STRING_DEF_SIZE, ASCII_STD);
+	pm_runtime_put_sync(hba->dev);
+//========================
+
+	if(!init_ufs_health_flag){
+		pre_Pre_EOL = desc_buf[2];
+		pre_life_time_A = desc_buf[3];
+		pre_life_time_B = desc_buf[4];
+		get_ufs_status(hba);
+		pr_info("[UFS_STATUS] vendor: %s, ufs_version=%s, ufs_size=%sG, fw_version=%s, lifeA=0x%02x, lifeB=0x%02x, preEOL=0x%02x\n", ufs_vendor, ufs_spec_ver, hba->ufs_total_size, (str_desc_buf+2), pre_life_time_A, pre_life_time_B, pre_Pre_EOL);
+		//ASUSEvtlog("[UFS_STATUS] vendor: %s, ufs_version=%s, ufs_size=%sG, fw_version=%s, lifeA=0x%02x, lifeB=0x%02x, preEOL=0x%02x\n", ufs_vendor, ufs_spec_ver, hba->ufs_total_size, (str_desc_buf+2), pre_life_time_A, pre_life_time_B, pre_Pre_EOL);
+		init_ufs_health_flag = true;
+	}else{
+		if(pre_Pre_EOL != desc_buf[2] || pre_life_time_A != desc_buf[3] || pre_life_time_B != desc_buf[4]){
+			pr_info("[UFS_STATUS] vendor: %s, ufs_version=%s, ufs_size=%sG, fw_version=%s, lifeA=0x%02x, lifeB=0x%02x, preEOL=0x%02x\n", ufs_vendor, ufs_spec_ver, hba->ufs_total_size, (str_desc_buf+2), pre_life_time_A, pre_life_time_B, pre_Pre_EOL);
+			//ASUSEvtlog("[UFS_STATUS] vendor: %s, ufs_version=%s, ufs_size=%sG, fw_version=%s, lifeA=0x%02x, lifeB=0x%02x, preEOL=0x%02x\n", ufs_vendor, ufs_spec_ver, hba->ufs_total_size, (str_desc_buf+2), pre_life_time_A, pre_life_time_B, pre_Pre_EOL);
+			pre_Pre_EOL = desc_buf[2];
+			pre_life_time_A = desc_buf[3];
+			pre_life_time_B = desc_buf[4];
+		}
+	}
+}
+
 /**
  * ufshcd_init - Driver initialization routine
  * @hba: per-adapter instance
@@ -11121,6 +11503,7 @@ int ufshcd_init(struct ufs_hba *hba, void __iomem *mmio_base, unsigned int irq)
 	/* Get UFS version supported by the controller */
 	hba->ufs_version = ufshcd_get_ufs_version(hba);
 
+	printk("[UFS] hba->ufs_version : 0x%x\n", hba->ufs_version);
 	/* print error message if ufs_version is not valid */
 	if ((hba->ufs_version != UFSHCI_VERSION_10) &&
 	    (hba->ufs_version != UFSHCI_VERSION_11) &&

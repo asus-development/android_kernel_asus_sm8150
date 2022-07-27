@@ -574,6 +574,18 @@ retry_dn:
 			goto err;
 		}
 
+		if (__is_valid_data_blkaddr(src) &&
+			!f2fs_is_valid_blkaddr(sbi, src, META_POR)) {
+			err = -EFSCORRUPTED;
+			goto err;
+		}
+
+		if (__is_valid_data_blkaddr(dest) &&
+			!f2fs_is_valid_blkaddr(sbi, dest, META_POR)) {
+			err = -EFSCORRUPTED;
+			goto err;
+		}
+
 		/* skip recovering if dest is the same as src */
 		if (src == dest)
 			continue;

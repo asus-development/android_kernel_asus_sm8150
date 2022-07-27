@@ -25,6 +25,12 @@
 #define to_drm_minor(d) dev_get_drvdata(d)
 #define to_drm_connector(d) dev_get_drvdata(d)
 
+extern void asus_lcd_cabc_set(int mode);
+extern int asus_lcd_cabc_get(void);
+static int gHDRMode = 0;
+static int gLastCABCMode = 0;
+static int gColorMode = 0;
+
 /**
  * DOC: overview
  *
@@ -52,6 +58,73 @@ static char *drm_devnode(struct device *dev, umode_t *mode)
 
 static CLASS_ATTR_STRING(version, S_IRUGO, "drm 1.1.0 20060810");
 
+// ASUS_BSP Display +++
+static ssize_t hdr_mode_show(struct class *class,
+					struct class_attribute *attr,
+					char *buf)
+{
+	printk("[Display] show HDR mode %d\n", gHDRMode);
+	return snprintf(buf, 8, "%d\n", gHDRMode);
+}
+
+static ssize_t hdr_mode_store(struct class *class,
+					struct class_attribute *attr,
+					const char *buf, size_t count)
+{
+	if (!count)
+		return -EINVAL;
+
+	if (!strncmp(buf, "1", 1)) {
+		printk("[Display] store HDR mode 1\n");
+		gLastCABCMode = asus_lcd_cabc_get();
+		asus_lcd_cabc_set(0);
+		gHDRMode = 1;
+	} else if (!strncmp(buf, "0", 1)) {
+		printk("[Display] store HDR mode 0\n");
+		asus_lcd_cabc_set(gLastCABCMode);
+		gHDRMode = 0;
+	} else {
+		printk("[Display] unknown HDR mode\n");
+	}
+
+	return count;
+}
+static CLASS_ATTR_RW(hdr_mode);
+
+static ssize_t color_mode_show(struct class *class,
+					struct class_attribute *attr,
+					char *buf)
+{
+	printk("[Display] show color mode %d\n", gColorMode);
+	return snprintf(buf, 8, "%d\n", gColorMode);
+}
+
+static ssize_t color_mode_store(struct class *class,
+					struct class_attribute *attr,
+					const char *buf, size_t count)
+{
+	if (!count)
+		return -EINVAL;
+
+	if (!strncmp(buf, "0", 1)) {
+		gColorMode = 0;
+	} else if (!strncmp(buf, "7", 1)) {
+		gColorMode = 7;
+	} else if (!strncmp(buf, "9", 1)) {
+		gColorMode = 9;
+	} else if (!strncmp(buf, "11", 2)) {
+		gColorMode = 11;
+	} else if (!strncmp(buf, "12", 2)) {
+		gColorMode = 12;
+	} else {
+		printk("[Display] unknown Color mode\n");
+	}
+
+	return count;
+}
+static CLASS_ATTR_RW(color_mode);
+// ASUS_BSP Display ---
+
 /**
  * drm_sysfs_init - initialize sysfs helpers
  *
@@ -77,6 +150,22 @@ int drm_sysfs_init(void)
 		return err;
 	}
 
+	err = class_create_file(drm_class, &class_attr_hdr_mode);
+	if (err) {
+		printk("[Display] Fail to create hdr_mode file node\n");
+		class_destroy(drm_class);
+		drm_class = NULL;
+		return err;
+	}
+
+	err = class_create_file(drm_class, &class_attr_color_mode);
+	if (err) {
+		printk("[Display] Fail to create color_mode file node\n");
+		class_destroy(drm_class);
+		drm_class = NULL;
+		return err;
+	}
+
 	drm_class->devnode = drm_devnode;
 	return 0;
 }
@@ -91,6 +180,8 @@ void drm_sysfs_destroy(void)
 	if (IS_ERR_OR_NULL(drm_class))
 		return;
 	class_remove_file(drm_class, &class_attr_version.attr);
+	class_remove_file(drm_class, &class_attr_hdr_mode);
+	class_remove_file(drm_class, &class_attr_color_mode);
 	class_destroy(drm_class);
 	drm_class = NULL;
 }

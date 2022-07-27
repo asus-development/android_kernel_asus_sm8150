@@ -248,6 +248,12 @@ static struct attribute *ext4_feat_attrs[] = {
 #ifdef CONFIG_FS_VERITY
 	ATTR_LIST(verity),
 #endif
+#ifdef CONFIG_UNICODE
+	ATTR_LIST(casefold),
+#endif
+#ifdef CONFIG_FS_VERITY
+	ATTR_LIST(verity),
+#endif
 	ATTR_LIST(metadata_csum_seed),
 	NULL,
 };
