@@ -47,7 +47,7 @@ static const char * const gpio_map[] = {
 };
 
 struct gpio_cntrl {
-	unsigned int gpios[NUM_GPIOS];
+	int gpios[NUM_GPIOS];
 	int status_irq;
 	int wakeup_irq;
 	int policy;
@@ -142,15 +142,13 @@ static int sideband_notify(struct notifier_block *nb,
 
 	switch (action) {
 
-	case EVT_WAKE_UP:
+	case EVENT_REQUEST_WAKE_UP:
 		gpio_set_value(mdm->gpios[WAKEUP_OUT], 1);
 		usleep_range(10000, 20000);
 		gpio_set_value(mdm->gpios[WAKEUP_OUT], 0);
 		break;
-	default:
-		dev_info(mdm->dev, "Invalid action passed %d\n",
-				action);
 	}
+
 	return NOTIFY_OK;
 }
 
@@ -264,7 +262,7 @@ static int setup_ipc(struct gpio_cntrl *mdm)
 
 		irq = gpio_to_irq(mdm->gpios[WAKEUP_IN]);
 		if (irq < 0) {
-			dev_err(mdm->dev, "bad AP2MDM_STATUS IRQ resource\n");
+			dev_err(mdm->dev, "bad WAKEUP_IN IRQ resource\n");
 			return irq;
 		}
 		mdm->wakeup_irq = irq;
@@ -347,16 +345,15 @@ static int sdx_ext_ipc_probe(struct platform_device *pdev)
 
 	if (mdm->gpios[WAKEUP_IN] >= 0) {
 		ret = devm_request_threaded_irq(mdm->dev, mdm->wakeup_irq,
-				NULL, sdx_ext_ipc_wakeup_irq,
+				sdx_ext_ipc_wakeup_irq, NULL,
 				IRQF_TRIGGER_FALLING, "sdx_ext_ipc_wakeup",
 				mdm);
 		if (ret < 0) {
 			dev_err(mdm->dev,
 				"%s: WAKEUP_IN IRQ#%d request failed,\n",
-				__func__, mdm->status_irq);
+				__func__, mdm->wakeup_irq);
 			goto irq_fail;
 		}
-		disable_irq(mdm->wakeup_irq);
 	}
 
 	if (mdm->gpios[WAKEUP_OUT] >= 0) {

@@ -1,5 +1,5 @@
-/* Copyright (c) 2011-2020, The Linux Foundation. All rights reserved.
- *
+/* Copyright (c) 2011-2021, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2022-2023, Qualcomm Innovation Center, Inc. All rights reserved.
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
  * only version 2 as published by the Free Software Foundation.
@@ -189,7 +189,7 @@ int kgsl_iommu_map_global_secure_pt_entry(struct kgsl_device *device,
 		struct kgsl_pagetable *pagetable = device->mmu.securepagetable;
 
 		entry->pagetable = pagetable;
-		entry->gpuaddr = KGSL_IOMMU_SECURE_BASE(&device->mmu) +
+		entry->gpuaddr = device->mmu.secure_base +
 			secure_global_size;
 
 		ret = kgsl_mmu_map(pagetable, entry);
@@ -1098,13 +1098,13 @@ static void setup_64bit_pagetable(struct kgsl_mmu *mmu,
 		struct kgsl_iommu_pt *pt)
 {
 	if (mmu->secured && pagetable->name == KGSL_MMU_SECURE_PT) {
-		pt->compat_va_start = KGSL_IOMMU_SECURE_BASE(mmu);
+		pt->compat_va_start = mmu->secure_base;
 		pt->compat_va_end = KGSL_IOMMU_SECURE_END(mmu);
-		pt->va_start = KGSL_IOMMU_SECURE_BASE(mmu);
+		pt->va_start = mmu->secure_base;
 		pt->va_end = KGSL_IOMMU_SECURE_END(mmu);
 	} else {
 		pt->compat_va_start = mmu->svm_base32;
-		pt->compat_va_end = KGSL_IOMMU_SECURE_BASE(mmu);
+		pt->compat_va_end = mmu->secure_base;
 		pt->va_start = KGSL_IOMMU_VA_BASE64;
 		pt->va_end = KGSL_IOMMU_VA_END64;
 	}
@@ -1113,7 +1113,7 @@ static void setup_64bit_pagetable(struct kgsl_mmu *mmu,
 		pagetable->name != KGSL_MMU_SECURE_PT) {
 		if (kgsl_is_compat_task()) {
 			pt->svm_start = mmu->svm_base32;
-			pt->svm_end = KGSL_IOMMU_SECURE_BASE(mmu);
+			pt->svm_end = mmu->secure_base;
 		} else {
 			pt->svm_start = KGSL_IOMMU_SVM_BASE64;
 			pt->svm_end = KGSL_IOMMU_SVM_END64;
@@ -1127,13 +1127,13 @@ static void setup_32bit_pagetable(struct kgsl_mmu *mmu,
 {
 	if (mmu->secured) {
 		if (pagetable->name == KGSL_MMU_SECURE_PT) {
-			pt->compat_va_start = KGSL_IOMMU_SECURE_BASE(mmu);
+			pt->compat_va_start = mmu->secure_base;
 			pt->compat_va_end = KGSL_IOMMU_SECURE_END(mmu);
-			pt->va_start = KGSL_IOMMU_SECURE_BASE(mmu);
+			pt->va_start = mmu->secure_base;
 			pt->va_end = KGSL_IOMMU_SECURE_END(mmu);
 		} else {
 			pt->va_start = mmu->svm_base32;
-			pt->va_end = KGSL_IOMMU_SECURE_BASE(mmu);
+			pt->va_end = mmu->secure_base;
 			pt->compat_va_start = pt->va_start;
 			pt->compat_va_end = pt->va_end;
 		}
@@ -2506,14 +2506,18 @@ static uint64_t kgsl_iommu_find_svm_region(struct kgsl_pagetable *pagetable,
 static bool iommu_addr_in_svm_ranges(struct kgsl_iommu_pt *pt,
 	u64 gpuaddr, u64 size)
 {
+	u64 end = gpuaddr + size;
+
+	/* Make sure size is not zero and we don't wrap around */
+	if (end <= gpuaddr)
+		return false;
+
 	if ((gpuaddr >= pt->compat_va_start && gpuaddr < pt->compat_va_end) &&
-		((gpuaddr + size) > pt->compat_va_start &&
-			(gpuaddr + size) <= pt->compat_va_end))
+		(end > pt->compat_va_start && end <= pt->compat_va_end))
 		return true;
 
 	if ((gpuaddr >= pt->svm_start && gpuaddr < pt->svm_end) &&
-		((gpuaddr + size) > pt->svm_start &&
-			(gpuaddr + size) <= pt->svm_end))
+		(end > pt->svm_start && end <= pt->svm_end))
 		return true;
 
 	return false;
@@ -2600,6 +2604,11 @@ static int kgsl_iommu_get_gpuaddr(struct kgsl_pagetable *pagetable,
 		goto out;
 	}
 
+	/*
+	 * This path is only called in a non-SVM path with locks so we can be
+	 * sure we aren't racing with anybody so we don't need to worry about
+	 * taking the lock
+	 */
 	ret = _insert_gpuaddr(pagetable, addr, size);
 	if (ret == 0) {
 		memdesc->gpuaddr = addr;
@@ -2638,20 +2647,21 @@ static int kgsl_iommu_svm_range(struct kgsl_pagetable *pagetable,
 }
 
 static bool kgsl_iommu_addr_in_range(struct kgsl_pagetable *pagetable,
-		uint64_t gpuaddr)
+		uint64_t gpuaddr, uint64_t size)
 {
 	struct kgsl_iommu_pt *pt = pagetable->priv;
 
 	if (gpuaddr == 0)
 		return false;
 
-	if (gpuaddr >= pt->va_start && gpuaddr < pt->va_end)
+	if (gpuaddr >= pt->va_start && (gpuaddr + size) < pt->va_end)
 		return true;
 
-	if (gpuaddr >= pt->compat_va_start && gpuaddr < pt->compat_va_end)
+	if (gpuaddr >= pt->compat_va_start &&
+		       (gpuaddr + size) < pt->compat_va_end)
 		return true;
 
-	if (gpuaddr >= pt->svm_start && gpuaddr < pt->svm_end)
+	if (gpuaddr >= pt->svm_start && (gpuaddr + size) < pt->svm_end)
 		return true;
 
 	return false;
@@ -2741,6 +2751,7 @@ static int _kgsl_iommu_probe(struct kgsl_device *device,
 	u32 reg_val[2];
 	int i = 0;
 	struct kgsl_iommu *iommu = KGSL_IOMMU_PRIV(device);
+	struct kgsl_mmu *mmu = &device->mmu;
 	struct kgsl_pwrctrl *pwr = &device->pwrctrl;
 	struct device_node *child;
 	struct platform_device *pdev = of_find_device_by_node(node);
@@ -2785,7 +2796,7 @@ static int _kgsl_iommu_probe(struct kgsl_device *device,
 
 	for (i = 0; i < ARRAY_SIZE(kgsl_iommu_features); i++) {
 		if (of_property_read_bool(node, kgsl_iommu_features[i].feature))
-			device->mmu.features |= kgsl_iommu_features[i].bit;
+			mmu->features |= kgsl_iommu_features[i].bit;
 	}
 
 	/*
@@ -2806,8 +2817,16 @@ static int _kgsl_iommu_probe(struct kgsl_device *device,
 		iommu->micro_mmu_ctrl = UINT_MAX;
 
 	if (of_property_read_u32(node, "qcom,secure_align_mask",
-		&device->mmu.secure_align_mask))
-		device->mmu.secure_align_mask = 0xfff;
+		&mmu->secure_align_mask))
+		mmu->secure_align_mask = 0xfff;
+
+	if (of_property_read_u32(node, "qcom,secure-size", &mmu->secure_size))
+		mmu->secure_size = KGSL_IOMMU_SECURE_SIZE;
+	else if (mmu->secure_size >
+			(KGSL_IOMMU_SECURE_END(mmu) - mmu->svm_base32))
+		mmu->secure_size = KGSL_IOMMU_SECURE_SIZE;
+
+	mmu->secure_base = KGSL_IOMMU_SECURE_END(mmu) - mmu->secure_size;
 
 	/* Fill out the rest of the devices in the node */
 	of_platform_populate(node, NULL, NULL, &pdev->dev);

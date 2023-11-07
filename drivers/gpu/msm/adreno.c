@@ -1,4 +1,5 @@
 /* Copyright (c) 2002,2007-2020, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2022 Qualcomm Innovation Center, Inc. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -1445,6 +1446,8 @@ static int adreno_probe(struct platform_device *pdev)
 	adreno_debugfs_init(adreno_dev);
 	adreno_profile_init(adreno_dev);
 
+	adreno_dev->perfcounter = false;
+
 	adreno_sysfs_init(adreno_dev);
 
 	kgsl_pwrscale_init(&pdev->dev, CONFIG_QCOM_ADRENO_DEFAULT_GOVERNOR);
@@ -1814,10 +1817,10 @@ static void _set_secvid(struct kgsl_device *device)
 		adreno_writereg64(adreno_dev,
 			ADRENO_REG_RBBM_SECVID_TSB_TRUSTED_BASE,
 			ADRENO_REG_RBBM_SECVID_TSB_TRUSTED_BASE_HI,
-			KGSL_IOMMU_SECURE_BASE(&device->mmu));
+			device->mmu.secure_base);
 		adreno_writereg(adreno_dev,
 			ADRENO_REG_RBBM_SECVID_TSB_TRUSTED_SIZE,
-			KGSL_IOMMU_SECURE_SIZE);
+			device->mmu.secure_size);
 		if (ADRENO_QUIRK(adreno_dev, ADRENO_QUIRK_SECVID_SET_ONCE))
 			set = true;
 	}
@@ -3525,32 +3528,26 @@ int adreno_gmu_fenced_write(struct adreno_device *adreno_dev,
 		 * was successful
 		 */
 		if (!(status & fence_mask))
-			break;
-
+			return 0;
 		/* Wait a small amount of time before trying again */
 		udelay(GMU_CORE_WAKEUP_DELAY_US);
 
 		/* Try to write the fenced register again */
 		adreno_writereg(adreno_dev, offset, val);
-	}
 
-	if (i < GMU_CORE_SHORT_WAKEUP_RETRY_LIMIT)
-		return 0;
-
-	if (i == GMU_CORE_LONG_WAKEUP_RETRY_LIMIT) {
-		dev_err(adreno_dev->dev.dev,
-			"Timed out waiting %d usecs to write fenced register 0x%x\n",
-			i * GMU_CORE_WAKEUP_DELAY_US,
-			reg_offset);
-
-		return -ETIMEDOUT;
+		if (i == GMU_CORE_SHORT_WAKEUP_RETRY_LIMIT)
+			dev_err(adreno_dev->dev.dev,
+				"Waited %d usecs to write fenced register 0x%x. Continuing to wait...\n",
+				(GMU_CORE_SHORT_WAKEUP_RETRY_LIMIT *
+				GMU_CORE_WAKEUP_DELAY_US),
+				reg_offset);
 	}
 
 	dev_err(adreno_dev->dev.dev,
-		"Waited %d usecs to write fenced register 0x%x\n",
-		i * GMU_CORE_WAKEUP_DELAY_US, reg_offset);
-
-	return 0;
+		"Timed out waiting %d usecs to write fenced register 0x%x\n",
+		GMU_CORE_LONG_WAKEUP_RETRY_LIMIT * GMU_CORE_WAKEUP_DELAY_US,
+		reg_offset);
+	return -ETIMEDOUT;
 }
 
 unsigned int adreno_gmu_ifpc_show(struct adreno_device *adreno_dev)

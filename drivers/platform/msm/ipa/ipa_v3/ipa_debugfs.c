@@ -41,14 +41,6 @@ struct ipa3_debugfs_file {
 	const struct file_operations fops;
 };
 
-static const char * const ipa_eth_clients_strings[] = {
-	__stringify(AQC107),
-	__stringify(AQC113),
-	__stringify(RTK8111K),
-	__stringify(RTK8125B),
-	__stringify(NTN),
-	__stringify(EMAC),
-};
 
 const char *ipa3_event_name[] = {
 	__stringify(WLAN_CLIENT_CONNECT),
@@ -116,10 +108,12 @@ const char *ipa3_hdr_proc_type_name[] = {
 	__stringify(IPA_HDR_PROC_L2TP_HEADER_ADD),
 	__stringify(IPA_HDR_PROC_L2TP_HEADER_REMOVE),
 	__stringify(IPA_HDR_PROC_ETHII_TO_ETHII_EX),
+	__stringify(IPA_HDR_PROC_L2TP_UDP_HEADER_ADD),
+	__stringify(IPA_HDR_PROC_L2TP_UDP_HEADER_REMOVE),
+	__stringify(IPA_HDR_PROC_SET_DSCP),
 };
 
 static struct dentry *dent;
-static struct dentry *dent_eth;
 static char dbg_buff[IPA_MAX_MSG_LEN + 1];
 static char *active_clients_buf;
 
@@ -351,7 +345,6 @@ static ssize_t ipa3_write_keep_awake(struct file *file, const char __user *buf,
 {
 	unsigned long missing;
 	s8 option = 0;
-	uint32_t bw_mbps = 0;
 
 	if (sizeof(dbg_buff) < count + 1)
 		return -EFAULT;
@@ -364,34 +357,16 @@ static ssize_t ipa3_write_keep_awake(struct file *file, const char __user *buf,
 	if (kstrtos8(dbg_buff, 0, &option))
 		return -EFAULT;
 
-	switch (option) {
-	case 0:
-		IPA_ACTIVE_CLIENTS_DEC_SIMPLE();
-		bw_mbps = 0;
-		break;
-	case 1:
-		IPA_ACTIVE_CLIENTS_INC_SIMPLE();
-		bw_mbps = 0;
-		break;
-	case 2:
-		IPA_ACTIVE_CLIENTS_INC_SIMPLE();
-		bw_mbps = 700;
-		break;
-	case 3:
-		IPA_ACTIVE_CLIENTS_INC_SIMPLE();
-		bw_mbps = 3000;
-		break;
-	case 4:
-		IPA_ACTIVE_CLIENTS_INC_SIMPLE();
-		bw_mbps = 7000;
-		break;
-	default:
-		pr_err("Not support this vote (%d)\n", option);
-		return -EFAULT;
-	}
-	if (ipa3_vote_for_bus_bw(&bw_mbps)) {
-		IPAERR("Failed to vote for bus BW (%u)\n", bw_mbps);
-		return -EFAULT;
+	if (option == 0) {
+		if (ipa_pm_remove_dummy_clients()) {
+			pr_err("Failed to remove dummy clients\n");
+			return -EFAULT;
+		}
+	} else {
+		if (ipa_pm_add_dummy_clients(option - 1)) {
+			pr_err("Failed to add dummy clients\n");
+			return -EFAULT;
+		}
 	}
 
 	return count;
@@ -559,6 +534,9 @@ static int ipa3_attrib_dump(struct ipa_rule_attrib *attrib,
 	if (attrib->attrib_mask & IPA_FLT_NEXT_HDR)
 		pr_err("next_hdr:%d ", attrib->u.v6.next_hdr);
 
+	if (attrib->ext_attrib_mask & IPA_FLT_EXT_NEXT_HDR)
+		pr_err("next_hdr:%d ", attrib->u.v6.next_hdr);
+
 	if (attrib->attrib_mask & IPA_FLT_META_DATA) {
 		pr_err(
 				   "metadata:%x metadata_mask:%x ",
@@ -577,11 +555,16 @@ static int ipa3_attrib_dump(struct ipa_rule_attrib *attrib,
 	if ((attrib->attrib_mask & IPA_FLT_MAC_DST_ADDR_ETHER_II) ||
 		(attrib->attrib_mask & IPA_FLT_MAC_DST_ADDR_802_3) ||
 		(attrib->attrib_mask & IPA_FLT_MAC_DST_ADDR_L2TP) ||
-		(attrib->attrib_mask & IPA_FLT_MAC_DST_ADDR_802_1Q)) {
+		(attrib->attrib_mask & IPA_FLT_MAC_DST_ADDR_802_1Q) ||
+		(attrib->attrib_mask & IPA_FLT_L2TP_UDP_INNER_MAC_DST_ADDR)) {
 		pr_err("dst_mac_addr:%pM ", attrib->dst_mac_addr);
 	}
 
-	if (attrib->attrib_mask & IPA_FLT_MAC_ETHER_TYPE)
+	if (attrib->ext_attrib_mask & IPA_FLT_EXT_MTU)
+		pr_err("Payload Length:%d ", attrib->payload_length);
+
+	if (attrib->attrib_mask & IPA_FLT_MAC_ETHER_TYPE ||
+		attrib->ext_attrib_mask & IPA_FLT_EXT_L2TP_UDP_INNER_ETHER_TYPE)
 		pr_err("ether_type:%x ", attrib->ether_type);
 
 	if (attrib->attrib_mask & IPA_FLT_VLAN_ID)
@@ -590,7 +573,8 @@ static int ipa3_attrib_dump(struct ipa_rule_attrib *attrib,
 	if (attrib->attrib_mask & IPA_FLT_TCP_SYN)
 		pr_err("tcp syn ");
 
-	if (attrib->attrib_mask & IPA_FLT_TCP_SYN_L2TP)
+	if (attrib->attrib_mask & IPA_FLT_TCP_SYN_L2TP ||
+		attrib->ext_attrib_mask & IPA_FLT_EXT_L2TP_UDP_TCP_SYN)
 		pr_err("tcp syn l2tp ");
 
 	if (attrib->attrib_mask & IPA_FLT_L2TP_INNER_IP_TYPE)
@@ -1181,6 +1165,7 @@ static ssize_t ipa3_read_stats(struct file *file, char __user *ubuf,
 		"lan_repl_rx_empty=%u\n"
 		"flow_enable=%u\n"
 		"flow_disable=%u\n",
+		"rx_page_drop_cnt=%u\n",
 		ipa3_ctx->stats.tx_sw_pkts,
 		ipa3_ctx->stats.tx_hw_pkts,
 		ipa3_ctx->stats.tx_non_linear,
@@ -1196,7 +1181,8 @@ static ssize_t ipa3_read_stats(struct file *file, char __user *ubuf,
 		ipa3_ctx->stats.lan_rx_empty,
 		ipa3_ctx->stats.lan_repl_rx_empty,
 		ipa3_ctx->stats.flow_enable,
-		ipa3_ctx->stats.flow_disable);
+		ipa3_ctx->stats.flow_disable,
+		ipa3_ctx->stats.rx_page_drop_cnt);
 	cnt += nbytes;
 
 	for (i = 0; i < IPAHAL_PKT_STATUS_EXCEPTION_MAX; i++) {
@@ -1232,6 +1218,26 @@ static ssize_t ipa3_read_odlstats(struct file *file, char __user *ubuf,
 	return simple_read_from_buffer(ubuf, count, ppos, dbg_buff, cnt);
 }
 
+static ssize_t ipa3_read_page_recycle_stats(struct file *file,
+		char __user *ubuf, size_t count, loff_t *ppos)
+{
+	int nbytes;
+	int cnt = 0;
+
+	nbytes = scnprintf(dbg_buff, IPA_MAX_MSG_LEN,
+			"COAL : Total number of packets replenished =%llu\n"
+			"COAL : Number of tmp alloc packets  =%llu\n"
+			"DEF  : Total number of packets replenished =%llu\n"
+			"DEF  : Number of tmp alloc packets  =%llu\n",
+			ipa3_ctx->stats.page_recycle_stats[0].total_replenished,
+			ipa3_ctx->stats.page_recycle_stats[0].tmp_alloc,
+			ipa3_ctx->stats.page_recycle_stats[1].total_replenished,
+			ipa3_ctx->stats.page_recycle_stats[1].tmp_alloc);
+
+	cnt += nbytes;
+
+	return simple_read_from_buffer(ubuf, count, ppos, dbg_buff, cnt);
+}
 static ssize_t ipa3_read_wstats(struct file *file, char __user *ubuf,
 		size_t count, loff_t *ppos)
 {
@@ -1348,13 +1354,6 @@ nxt_clnt_cons:
 				cnt += nbytes;
 				continue;
 			case IPA_CLIENT_WLAN2_CONS:
-				client = IPA_CLIENT_WLAN2_CONS1;
-				nbytes = scnprintf(dbg_buff + cnt,
-					IPA_MAX_MSG_LEN - cnt, HEAD_FRMT_STR,
-					"Client IPA_CLIENT_WLAN2_CONS1 Stats:");
-				cnt += nbytes;
-				continue;
-			case IPA_CLIENT_WLAN2_CONS1:
 				client = IPA_CLIENT_WLAN3_CONS;
 				nbytes = scnprintf(dbg_buff + cnt,
 					IPA_MAX_MSG_LEN - cnt, HEAD_FRMT_STR,
@@ -1398,76 +1397,83 @@ nxt_clnt_cons:
 static ssize_t ipa3_read_ntn(struct file *file, char __user *ubuf,
 		size_t count, loff_t *ppos)
 {
-#define TX_STATS(y) \
-	stats.tx_ch_stats[0].y
-#define RX_STATS(y) \
-	stats.rx_ch_stats[0].y
+#define TX_STATS(x, y) \
+	stats.tx_ch_stats[x].y
+#define RX_STATS(x, y) \
+	stats.rx_ch_stats[x].y
 
 	struct Ipa3HwStatsNTNInfoData_t stats;
 	int nbytes;
-	int cnt = 0;
+	int cnt = 0, i = 0;
 
 	if (!ipa3_get_ntn_stats(&stats)) {
-		nbytes = scnprintf(dbg_buff, IPA_MAX_MSG_LEN,
-			"TX num_pkts_processed=%u\n"
-			"TX ringFull=%u\n"
-			"TX ringEmpty=%u\n"
-			"TX ringUsageHigh=%u\n"
-			"TX ringUsageLow=%u\n"
-			"TX RingUtilCount=%u\n"
-			"TX bamFifoFull=%u\n"
-			"TX bamFifoEmpty=%u\n"
-			"TX bamFifoUsageHigh=%u\n"
-			"TX bamFifoUsageLow=%u\n"
-			"TX bamUtilCount=%u\n"
-			"TX num_db=%u\n"
-			"TX num_qmb_int_handled=%u\n"
-			"TX ipa_pipe_number=%u\n",
-			TX_STATS(num_pkts_processed),
-			TX_STATS(ring_stats.ringFull),
-			TX_STATS(ring_stats.ringEmpty),
-			TX_STATS(ring_stats.ringUsageHigh),
-			TX_STATS(ring_stats.ringUsageLow),
-			TX_STATS(ring_stats.RingUtilCount),
-			TX_STATS(gsi_stats.bamFifoFull),
-			TX_STATS(gsi_stats.bamFifoEmpty),
-			TX_STATS(gsi_stats.bamFifoUsageHigh),
-			TX_STATS(gsi_stats.bamFifoUsageLow),
-			TX_STATS(gsi_stats.bamUtilCount),
-			TX_STATS(num_db),
-			TX_STATS(num_qmb_int_handled),
-			TX_STATS(ipa_pipe_number));
-		cnt += nbytes;
-		nbytes = scnprintf(dbg_buff + cnt, IPA_MAX_MSG_LEN - cnt,
-			"RX num_pkts_processed=%u\n"
-			"RX ringFull=%u\n"
-			"RX ringEmpty=%u\n"
-			"RX ringUsageHigh=%u\n"
-			"RX ringUsageLow=%u\n"
-			"RX RingUtilCount=%u\n"
-			"RX bamFifoFull=%u\n"
-			"RX bamFifoEmpty=%u\n"
-			"RX bamFifoUsageHigh=%u\n"
-			"RX bamFifoUsageLow=%u\n"
-			"RX bamUtilCount=%u\n"
-			"RX num_db=%u\n"
-			"RX num_qmb_int_handled=%u\n"
-			"RX ipa_pipe_number=%u\n",
-			RX_STATS(num_pkts_processed),
-			RX_STATS(ring_stats.ringFull),
-			RX_STATS(ring_stats.ringEmpty),
-			RX_STATS(ring_stats.ringUsageHigh),
-			RX_STATS(ring_stats.ringUsageLow),
-			RX_STATS(ring_stats.RingUtilCount),
-			RX_STATS(gsi_stats.bamFifoFull),
-			RX_STATS(gsi_stats.bamFifoEmpty),
-			RX_STATS(gsi_stats.bamFifoUsageHigh),
-			RX_STATS(gsi_stats.bamFifoUsageLow),
-			RX_STATS(gsi_stats.bamUtilCount),
-			RX_STATS(num_db),
-			RX_STATS(num_qmb_int_handled),
-			RX_STATS(ipa_pipe_number));
-		cnt += nbytes;
+		for (i = 0; i < IPA_UC_MAX_NTN_TX_CHANNELS; i++) {
+			nbytes = scnprintf(dbg_buff + cnt,
+				IPA_MAX_MSG_LEN - cnt,
+				"TX%d num_pkts_psr=%u\n"
+				"TX%d ringFull=%u\n"
+				"TX%d ringEmpty=%u\n"
+				"TX%d ringUsageHigh=%u\n"
+				"TX%d ringUsageLow=%u\n"
+				"TX%d RingUtilCount=%u\n"
+				"TX%d bamFifoFull=%u\n"
+				"TX%d bamFifoEmpty=%u\n"
+				"TX%d bamFifoUsageHigh=%u\n"
+				"TX%d bamFifoUsageLow=%u\n"
+				"TX%d bamUtilCount=%u\n"
+				"TX%d num_db=%u\n"
+				"TX%d num_qmb_int_handled=%u\n"
+				"TX%d ipa_pipe_number=%u\n",
+				i, TX_STATS(i, num_pkts_processed),
+				i, TX_STATS(i, ring_stats.ringFull),
+				i, TX_STATS(i, ring_stats.ringEmpty),
+				i, TX_STATS(i, ring_stats.ringUsageHigh),
+				i, TX_STATS(i, ring_stats.ringUsageLow),
+				i, TX_STATS(i, ring_stats.RingUtilCount),
+				i, TX_STATS(i, gsi_stats.bamFifoFull),
+				i, TX_STATS(i, gsi_stats.bamFifoEmpty),
+				i, TX_STATS(i, gsi_stats.bamFifoUsageHigh),
+				i, TX_STATS(i, gsi_stats.bamFifoUsageLow),
+				i, TX_STATS(i, gsi_stats.bamUtilCount),
+				i, TX_STATS(i, num_db),
+				i, TX_STATS(i, num_qmb_int_handled),
+				i, TX_STATS(i, ipa_pipe_number));
+			cnt += nbytes;
+		}
+
+		for (i = 0; i < IPA_UC_MAX_NTN_RX_CHANNELS; i++) {
+			nbytes = scnprintf(dbg_buff + cnt,
+				IPA_MAX_MSG_LEN - cnt,
+				"RX%d num_pkts_psr=%u\n"
+				"RX%d ringFull=%u\n"
+				"RX%d ringEmpty=%u\n"
+				"RX%d ringUsageHigh=%u\n"
+				"RX%d ringUsageLow=%u\n"
+				"RX%d RingUtilCount=%u\n"
+				"RX%d bamFifoFull=%u\n"
+				"RX%d bamFifoEmpty=%u\n"
+				"RX%d bamFifoUsageHigh=%u\n"
+				"RX%d bamFifoUsageLow=%u\n"
+				"RX%d bamUtilCount=%u\n"
+				"RX%d num_db=%u\n"
+				"RX%d num_qmb_int_handled=%u\n"
+				"RX%d ipa_pipe_number=%u\n",
+				i, RX_STATS(i, num_pkts_processed),
+				i, RX_STATS(i, ring_stats.ringFull),
+				i, RX_STATS(i, ring_stats.ringEmpty),
+				i, RX_STATS(i, ring_stats.ringUsageHigh),
+				i, RX_STATS(i, ring_stats.ringUsageLow),
+				i, RX_STATS(i, ring_stats.RingUtilCount),
+				i, RX_STATS(i, gsi_stats.bamFifoFull),
+				i, RX_STATS(i, gsi_stats.bamFifoEmpty),
+				i, RX_STATS(i, gsi_stats.bamFifoUsageHigh),
+				i, RX_STATS(i, gsi_stats.bamFifoUsageLow),
+				i, RX_STATS(i, gsi_stats.bamUtilCount),
+				i, RX_STATS(i, num_db),
+				i, RX_STATS(i, num_qmb_int_handled),
+				i, RX_STATS(i, ipa_pipe_number));
+			cnt += nbytes;
+		}
 	} else {
 		nbytes = scnprintf(dbg_buff, IPA_MAX_MSG_LEN,
 				"Fail to read NTN stats\n");
@@ -2221,11 +2227,11 @@ static ssize_t ipa3_read_wdi_gsi_stats(struct file *file,
 			"TX ringUsageHigh=%u\n"
 			"TX ringUsageLow=%u\n"
 			"TX RingUtilCount=%u\n",
-			stats.u.ring[1].ringFull,
-			stats.u.ring[1].ringEmpty,
-			stats.u.ring[1].ringUsageHigh,
-			stats.u.ring[1].ringUsageLow,
-			stats.u.ring[1].RingUtilCount);
+			stats.ring[1].ringFull,
+			stats.ring[1].ringEmpty,
+			stats.ring[1].ringUsageHigh,
+			stats.ring[1].ringUsageLow,
+			stats.ring[1].RingUtilCount);
 		cnt += nbytes;
 		nbytes = scnprintf(dbg_buff + cnt, IPA_MAX_MSG_LEN - cnt,
 			"RX ringFull=%u\n"
@@ -2233,11 +2239,11 @@ static ssize_t ipa3_read_wdi_gsi_stats(struct file *file,
 			"RX ringUsageHigh=%u\n"
 			"RX ringUsageLow=%u\n"
 			"RX RingUtilCount=%u\n",
-			stats.u.ring[0].ringFull,
-			stats.u.ring[0].ringEmpty,
-			stats.u.ring[0].ringUsageHigh,
-			stats.u.ring[0].ringUsageLow,
-			stats.u.ring[0].RingUtilCount);
+			stats.ring[0].ringFull,
+			stats.ring[0].ringEmpty,
+			stats.ring[0].ringUsageHigh,
+			stats.ring[0].ringUsageLow,
+			stats.ring[0].RingUtilCount);
 		cnt += nbytes;
 	} else {
 		nbytes = scnprintf(dbg_buff, IPA_MAX_MSG_LEN,
@@ -2270,23 +2276,11 @@ static ssize_t ipa3_read_wdi3_gsi_stats(struct file *file,
 			"TX ringUsageHigh=%u\n"
 			"TX ringUsageLow=%u\n"
 			"TX RingUtilCount=%u\n",
-			stats.u.ring[1].ringFull,
-			stats.u.ring[1].ringEmpty,
-			stats.u.ring[1].ringUsageHigh,
-			stats.u.ring[1].ringUsageLow,
-			stats.u.ring[1].RingUtilCount);
-		cnt += nbytes;
-		nbytes = scnprintf(dbg_buff + cnt, IPA_MAX_MSG_LEN - cnt,
-			"TX1 ringFull=%u\n"
-			"TX1 ringEmpty=%u\n"
-			"TX1 ringUsageHigh=%u\n"
-			"TX1 ringUsageLow=%u\n"
-			"TX1 RingUtilCount=%u\n",
-			stats.u.ring[2].ringFull,
-			stats.u.ring[2].ringEmpty,
-			stats.u.ring[2].ringUsageHigh,
-			stats.u.ring[2].ringUsageLow,
-			stats.u.ring[2].RingUtilCount);
+			stats.ring[1].ringFull,
+			stats.ring[1].ringEmpty,
+			stats.ring[1].ringUsageHigh,
+			stats.ring[1].ringUsageLow,
+			stats.ring[1].RingUtilCount);
 		cnt += nbytes;
 		nbytes = scnprintf(dbg_buff + cnt, IPA_MAX_MSG_LEN - cnt,
 			"RX ringFull=%u\n"
@@ -2294,11 +2288,11 @@ static ssize_t ipa3_read_wdi3_gsi_stats(struct file *file,
 			"RX ringUsageHigh=%u\n"
 			"RX ringUsageLow=%u\n"
 			"RX RingUtilCount=%u\n",
-			stats.u.ring[0].ringFull,
-			stats.u.ring[0].ringEmpty,
-			stats.u.ring[0].ringUsageHigh,
-			stats.u.ring[0].ringUsageLow,
-			stats.u.ring[0].RingUtilCount);
+			stats.ring[0].ringFull,
+			stats.ring[0].ringEmpty,
+			stats.ring[0].ringUsageHigh,
+			stats.ring[0].ringUsageLow,
+			stats.ring[0].RingUtilCount);
 		cnt += nbytes;
 	} else {
 		nbytes = scnprintf(dbg_buff, IPA_MAX_MSG_LEN,
@@ -2351,11 +2345,11 @@ static ssize_t ipa3_read_aqc_gsi_stats(struct file *file,
 			"TX ringUsageHigh=%u\n"
 			"TX ringUsageLow=%u\n"
 			"TX RingUtilCount=%u\n",
-			stats.u.ring[1].ringFull,
-			stats.u.ring[1].ringEmpty,
-			stats.u.ring[1].ringUsageHigh,
-			stats.u.ring[1].ringUsageLow,
-			stats.u.ring[1].RingUtilCount);
+			stats.ring[1].ringFull,
+			stats.ring[1].ringEmpty,
+			stats.ring[1].ringUsageHigh,
+			stats.ring[1].ringUsageLow,
+			stats.ring[1].RingUtilCount);
 		cnt += nbytes;
 		nbytes = scnprintf(dbg_buff + cnt, IPA_MAX_MSG_LEN - cnt,
 			"RX ringFull=%u\n"
@@ -2363,11 +2357,11 @@ static ssize_t ipa3_read_aqc_gsi_stats(struct file *file,
 			"RX ringUsageHigh=%u\n"
 			"RX ringUsageLow=%u\n"
 			"RX RingUtilCount=%u\n",
-			stats.u.ring[0].ringFull,
-			stats.u.ring[0].ringEmpty,
-			stats.u.ring[0].ringUsageHigh,
-			stats.u.ring[0].ringUsageLow,
-			stats.u.ring[0].RingUtilCount);
+			stats.ring[0].ringFull,
+			stats.ring[0].ringEmpty,
+			stats.ring[0].ringUsageHigh,
+			stats.ring[0].ringUsageLow,
+			stats.ring[0].RingUtilCount);
 		cnt += nbytes;
 	} else {
 		nbytes = scnprintf(dbg_buff, IPA_MAX_MSG_LEN,
@@ -2400,11 +2394,11 @@ static ssize_t ipa3_read_mhip_gsi_stats(struct file *file,
 			"IPA_CLIENT_MHI_PRIME_TETH_CONS ringUsageHigh=%u\n"
 			"IPA_CLIENT_MHI_PRIME_TETH_CONS ringUsageLow=%u\n"
 			"IPA_CLIENT_MHI_PRIME_TETH_CONS RingUtilCount=%u\n",
-			stats.u.ring[1].ringFull,
-			stats.u.ring[1].ringEmpty,
-			stats.u.ring[1].ringUsageHigh,
-			stats.u.ring[1].ringUsageLow,
-			stats.u.ring[1].RingUtilCount);
+			stats.ring[1].ringFull,
+			stats.ring[1].ringEmpty,
+			stats.ring[1].ringUsageHigh,
+			stats.ring[1].ringUsageLow,
+			stats.ring[1].RingUtilCount);
 		cnt += nbytes;
 		nbytes = scnprintf(dbg_buff + cnt, IPA_MAX_MSG_LEN - cnt,
 			"IPA_CLIENT_MHI_PRIME_TETH_PROD ringFull=%u\n"
@@ -2412,11 +2406,11 @@ static ssize_t ipa3_read_mhip_gsi_stats(struct file *file,
 			"IPA_CLIENT_MHI_PRIME_TETH_PROD ringUsageHigh=%u\n"
 			"IPA_CLIENT_MHI_PRIME_TETH_PROD ringUsageLow=%u\n"
 			"IPA_CLIENT_MHI_PRIME_TETH_PROD RingUtilCount=%u\n",
-			stats.u.ring[0].ringFull,
-			stats.u.ring[0].ringEmpty,
-			stats.u.ring[0].ringUsageHigh,
-			stats.u.ring[0].ringUsageLow,
-			stats.u.ring[0].RingUtilCount);
+			stats.ring[0].ringFull,
+			stats.ring[0].ringEmpty,
+			stats.ring[0].ringUsageHigh,
+			stats.ring[0].ringUsageLow,
+			stats.ring[0].RingUtilCount);
 		cnt += nbytes;
 		nbytes = scnprintf(dbg_buff + cnt, IPA_MAX_MSG_LEN - cnt,
 			"IPA_CLIENT_MHI_PRIME_RMNET_CONS ringFull=%u\n"
@@ -2424,11 +2418,11 @@ static ssize_t ipa3_read_mhip_gsi_stats(struct file *file,
 			"IPA_CLIENT_MHI_PRIME_RMNET_CONS ringUsageHigh=%u\n"
 			"IPA_CLIENT_MHI_PRIME_RMNET_CONS ringUsageLow=%u\n"
 			"IPA_CLIENT_MHI_PRIME_RMNET_CONS RingUtilCount=%u\n",
-			stats.u.ring[3].ringFull,
-			stats.u.ring[3].ringEmpty,
-			stats.u.ring[3].ringUsageHigh,
-			stats.u.ring[3].ringUsageLow,
-			stats.u.ring[3].RingUtilCount);
+			stats.ring[3].ringFull,
+			stats.ring[3].ringEmpty,
+			stats.ring[3].ringUsageHigh,
+			stats.ring[3].ringUsageLow,
+			stats.ring[3].RingUtilCount);
 		cnt += nbytes;
 		nbytes = scnprintf(dbg_buff + cnt, IPA_MAX_MSG_LEN - cnt,
 			"IPA_CLIENT_MHI_PRIME_RMNET_PROD ringFull=%u\n"
@@ -2436,11 +2430,11 @@ static ssize_t ipa3_read_mhip_gsi_stats(struct file *file,
 			"IPA_CLIENT_MHI_PRIME_RMNET_PROD ringUsageHigh=%u\n"
 			"IPA_CLIENT_MHI_PRIME_RMNET_PROD ringUsageLow=%u\n"
 			"IPA_CLIENT_MHI_PRIME_RMNET_PROD RingUtilCount=%u\n",
-			stats.u.ring[2].ringFull,
-			stats.u.ring[2].ringEmpty,
-			stats.u.ring[2].ringUsageHigh,
-			stats.u.ring[2].ringUsageLow,
-			stats.u.ring[2].RingUtilCount);
+			stats.ring[2].ringFull,
+			stats.ring[2].ringEmpty,
+			stats.ring[2].ringUsageHigh,
+			stats.ring[2].ringUsageLow,
+			stats.ring[2].RingUtilCount);
 		cnt += nbytes;
 	} else {
 		nbytes = scnprintf(dbg_buff, IPA_MAX_MSG_LEN,
@@ -2474,11 +2468,11 @@ static ssize_t ipa3_read_usb_gsi_stats(struct file *file,
 			"TX ringUsageHigh=%u\n"
 			"TX ringUsageLow=%u\n"
 			"TX RingUtilCount=%u\n",
-			stats.u.ring[1].ringFull,
-			stats.u.ring[1].ringEmpty,
-			stats.u.ring[1].ringUsageHigh,
-			stats.u.ring[1].ringUsageLow,
-			stats.u.ring[1].RingUtilCount);
+			stats.ring[1].ringFull,
+			stats.ring[1].ringEmpty,
+			stats.ring[1].ringUsageHigh,
+			stats.ring[1].ringUsageLow,
+			stats.ring[1].RingUtilCount);
 		cnt += nbytes;
 		nbytes = scnprintf(dbg_buff + cnt, IPA_MAX_MSG_LEN - cnt,
 			"RX ringFull=%u\n"
@@ -2486,11 +2480,11 @@ static ssize_t ipa3_read_usb_gsi_stats(struct file *file,
 			"RX ringUsageHigh=%u\n"
 			"RX ringUsageLow=%u\n"
 			"RX RingUtilCount=%u\n",
-			stats.u.ring[0].ringFull,
-			stats.u.ring[0].ringEmpty,
-			stats.u.ring[0].ringUsageHigh,
-			stats.u.ring[0].ringUsageLow,
-			stats.u.ring[0].RingUtilCount);
+			stats.ring[0].ringFull,
+			stats.ring[0].ringEmpty,
+			stats.ring[0].ringUsageHigh,
+			stats.ring[0].ringUsageLow,
+			stats.ring[0].RingUtilCount);
 		cnt += nbytes;
 	} else {
 		nbytes = scnprintf(dbg_buff, IPA_MAX_MSG_LEN,
@@ -2863,6 +2857,10 @@ static const struct ipa3_debugfs_file debugfs_files[] = {
 			.read = ipa3_read_odlstats,
 		}
 	}, {
+		"page_recycle_stats", IPA_READ_ONLY_MODE, NULL, {
+			.read = ipa3_read_page_recycle_stats,
+		}
+	}, {
 		"wdi", IPA_READ_ONLY_MODE, NULL, {
 			.read = ipa3_read_wdi,
 		}
@@ -2948,7 +2946,7 @@ static const struct ipa3_debugfs_file debugfs_files[] = {
 
 void ipa3_debugfs_pre_init(void)
 {
-	dent = debugfs_create_dir("ipa", NULL);
+	dent = debugfs_create_dir("ipa", 0);
 	if (IS_ERR_OR_NULL(dent)) {
 		IPAERR("fail to create folder in debug_fs.\n");
 		dent = NULL;
@@ -3057,341 +3055,17 @@ struct dentry *ipa_debugfs_get_root(void)
 }
 EXPORT_SYMBOL(ipa_debugfs_get_root);
 
-static ssize_t ipa3_eth_read_status(struct file *file,
-	char __user *ubuf, size_t count, loff_t *ppos)
-{
-	int nbytes;
-	int cnt = 0;
-	int i, j, k, type;
-	struct ipa3_eth_info eth_info;
-
-	if (ipa3_ctx->ipa_hw_type < IPA_HW_v4_5) {
-		nbytes = scnprintf(dbg_buff, IPA_MAX_MSG_LEN,
-			"This feature only support on IPA4.5+\n");
-		cnt += nbytes;
-		goto done;
-	}
-
-	nbytes = scnprintf(dbg_buff, IPA_MAX_MSG_LEN,
-			"%15s|%10s|%10s|%30s|%10s|%10s\n", "protocol",
-			"instance", "pipe_hdl", "pipe_enum",
-			"pipe_id", "ch_id");
-	cnt += nbytes;
-	for (i = 0; i < IPA_ETH_CLIENT_MAX; i++) {
-		for (j = 0; j < IPA_ETH_INST_ID_MAX; j++) {
-			eth_info = ipa3_ctx->eth_info[i][j];
-			for (k = 0; k < eth_info.num_ch; k++) {
-				if (eth_info.map[j].valid) {
-					type = eth_info.map[k].type;
-					nbytes = scnprintf(dbg_buff + cnt,
-						IPA_MAX_MSG_LEN - cnt,
-						"%15s|%10d|%10d|%30s|%10d|%10d\n",
-						ipa_eth_clients_strings[i],
-						j,
-						eth_info.map[k].pipe_hdl,
-						ipa_clients_strings[type],
-						eth_info.map[k].pipe_id,
-						eth_info.map[k].ch_id);
-					cnt += nbytes;
-				}
-			}
-		}
-	}
-done:
-	return simple_read_from_buffer(ubuf, count, ppos, dbg_buff, cnt);
-}
-
-static const struct file_operations fops_ipa_eth_status = {
-	.read = ipa3_eth_read_status,
-};
-
-void ipa3_eth_debugfs_init(void)
-{
-	struct dentry *file;
-
-	if (IS_ERR_OR_NULL(dent)) {
-		IPAERR("debugs root not created\n");
-		return;
-	}
-	dent_eth = debugfs_create_dir("eth", dent);
-	if (IS_ERR(dent)) {
-		IPAERR("fail to create folder in debug_fs.\n");
-		return;
-	}
-	file = debugfs_create_file("status", IPA_READ_ONLY_MODE,
-		dent_eth, NULL, &fops_ipa_eth_status);
-	if (!file) {
-		IPAERR("could not create status\n");
-		goto fail;
-	}
-	return;
-
-fail:
-	debugfs_remove_recursive(dent_eth);
-}
-
-static ssize_t ipa3_eth_read_perf_status(struct file *file,
-	char __user *ubuf, size_t count, loff_t *ppos)
-{
-	int nbytes;
-	int cnt = 0;
-	struct ipa_eth_client *client;
-	struct ipa_uc_dbg_ring_stats stats;
-	int tx_ep, rx_ep;
-	int ret;
-
-	if (ipa3_ctx->ipa_hw_type < IPA_HW_v4_5
-		&& (ipa3_ctx->ipa_hw_type != IPA_HW_v4_1
-		|| ipa3_ctx->platform_type != IPA_PLAT_TYPE_APQ)) {
-		nbytes = scnprintf(dbg_buff, IPA_MAX_MSG_LEN,
-				"This feature only support on IPA4.5+\n");
-		cnt += nbytes;
-		goto done;
-	}
-	client = (struct ipa_eth_client *)file->private_data;
-	switch (client->client_type) {
-	case IPA_ETH_CLIENT_AQC107:
-	case IPA_ETH_CLIENT_AQC113:
-		ret = ipa3_get_aqc_gsi_stats(&stats);
-		tx_ep = IPA_CLIENT_AQC_ETHERNET_CONS;
-		rx_ep = IPA_CLIENT_AQC_ETHERNET_PROD;
-		if (!ret) {
-			nbytes = scnprintf(dbg_buff, IPA_MAX_MSG_LEN,
-			"%s_ringFull=%u\n"
-			"%s_ringEmpty=%u\n"
-			"%s_ringUsageHigh=%u\n"
-			"%s_ringUsageLow=%u\n"
-			"%s_RingUtilCount=%u\n",
-			ipa_clients_strings[tx_ep],
-			stats.u.ring[1].ringFull,
-			ipa_clients_strings[tx_ep],
-			stats.u.ring[1].ringEmpty,
-			ipa_clients_strings[tx_ep],
-			stats.u.ring[1].ringUsageHigh,
-			ipa_clients_strings[tx_ep],
-			stats.u.ring[1].ringUsageLow,
-			ipa_clients_strings[tx_ep],
-			stats.u.ring[1].RingUtilCount);
-			cnt += nbytes;
-			nbytes = scnprintf(dbg_buff + cnt,
-			IPA_MAX_MSG_LEN - cnt,
-			"%s_ringFull=%u\n"
-			"%s_ringEmpty=%u\n"
-			"%s_ringUsageHigh=%u\n"
-			"%s_ringUsageLow=%u\n"
-			"%s_RingUtilCount=%u\n",
-			ipa_clients_strings[rx_ep],
-			stats.u.ring[0].ringFull,
-			ipa_clients_strings[rx_ep],
-			stats.u.ring[0].ringEmpty,
-			ipa_clients_strings[rx_ep],
-			stats.u.ring[0].ringUsageHigh,
-			ipa_clients_strings[rx_ep],
-			stats.u.ring[0].ringUsageLow,
-			ipa_clients_strings[rx_ep],
-			stats.u.ring[0].RingUtilCount);
-			cnt += nbytes;
-		} else {
-			nbytes = scnprintf(dbg_buff,
-				IPA_MAX_MSG_LEN,
-				"Fail to read AQC GSI stats\n");
-			cnt += nbytes;
-		}
-		break;
-	case IPA_ETH_CLIENT_RTK8111K:
-	case IPA_ETH_CLIENT_RTK8125B:
-		ret = ipa3_get_rtk_gsi_stats(&stats);
-		tx_ep = IPA_CLIENT_RTK_ETHERNET_CONS;
-		rx_ep = IPA_CLIENT_RTK_ETHERNET_PROD;
-		if (!ret) {
-			nbytes = scnprintf(dbg_buff, IPA_MAX_MSG_LEN,
-			"%s_ringFull=%u\n"
-			"%s_ringEmpty=%u\n"
-			"%s_ringUsageHigh=%u\n"
-			"%s_ringUsageLow=%u\n"
-			"%s_RingUtilCount=%u\n"
-			"%s_trCount=%u\n"
-			"%s_erCound=%u\n"
-			"%s_totalAoSCount=%u\n"
-			"%s_busytime=%llu\n",
-			ipa_clients_strings[tx_ep],
-			stats.u.rtk[1].commStats.ringFull,
-			ipa_clients_strings[tx_ep],
-			stats.u.rtk[1].commStats.ringEmpty,
-			ipa_clients_strings[tx_ep],
-			stats.u.rtk[1].commStats.ringUsageHigh,
-			ipa_clients_strings[tx_ep],
-			stats.u.rtk[1].commStats.ringUsageLow,
-			ipa_clients_strings[tx_ep],
-			stats.u.rtk[1].commStats.RingUtilCount,
-			ipa_clients_strings[tx_ep],
-			stats.u.rtk[1].trCount,
-			ipa_clients_strings[tx_ep],
-			stats.u.rtk[1].erCount,
-			ipa_clients_strings[tx_ep],
-			stats.u.rtk[1].totalAosCount,
-			ipa_clients_strings[tx_ep],
-			stats.u.rtk[1].busyTime);
-			cnt += nbytes;
-			nbytes = scnprintf(dbg_buff + cnt,
-			IPA_MAX_MSG_LEN - cnt,
-			"%s_ringFull=%u\n"
-			"%s_ringEmpty=%u\n"
-			"%s_ringUsageHigh=%u\n"
-			"%s_ringUsageLow=%u\n"
-			"%s_RingUtilCount=%u\n"
-			"%s_trCount=%u\n"
-			"%s_erCount=%u\n"
-			"%s_totalAoSCount=%u\n"
-			"%s_busytime=%llu\n",
-			ipa_clients_strings[rx_ep],
-			stats.u.rtk[0].commStats.ringFull,
-			ipa_clients_strings[rx_ep],
-			stats.u.rtk[0].commStats.ringEmpty,
-			ipa_clients_strings[rx_ep],
-			stats.u.rtk[0].commStats.ringUsageHigh,
-			ipa_clients_strings[rx_ep],
-			stats.u.rtk[0].commStats.ringUsageLow,
-			ipa_clients_strings[rx_ep],
-			stats.u.rtk[0].commStats.RingUtilCount,
-			ipa_clients_strings[rx_ep],
-			stats.u.rtk[0].trCount,
-			ipa_clients_strings[rx_ep],
-			stats.u.rtk[0].erCount,
-			ipa_clients_strings[rx_ep],
-			stats.u.rtk[0].totalAosCount,
-			ipa_clients_strings[rx_ep],
-			stats.u.rtk[0].busyTime);
-			cnt += nbytes;
-		} else {
-			nbytes = scnprintf(dbg_buff, IPA_MAX_MSG_LEN,
-				"Fail to read AQC GSI stats\n");
-			cnt += nbytes;
-		}
-		break;
-	default:
-		ret = -EFAULT;
-	}
-
-done:
-	return simple_read_from_buffer(ubuf, count, ppos, dbg_buff, cnt);
-}
-
-static ssize_t ipa3_eth_read_err_status(struct file *file,
-	char __user *ubuf, size_t count, loff_t *ppos)
-{
-	int nbytes;
-	int cnt = 0;
-	struct ipa_eth_client *client;
-	int tx_ep, rx_ep;
-	struct ipa3_eth_error_stats tx_stats;
-	struct ipa3_eth_error_stats rx_stats;
-
-	if (ipa3_ctx->ipa_hw_type < IPA_HW_v4_5
-		&& (ipa3_ctx->ipa_hw_type != IPA_HW_v4_1
-		|| ipa3_ctx->platform_type != IPA_PLAT_TYPE_APQ)) {
-		nbytes = scnprintf(dbg_buff, IPA_MAX_MSG_LEN,
-				"This feature only support on IPA4.5+\n");
-		cnt += nbytes;
-		goto done;
-	}
-	client = (struct ipa_eth_client *)file->private_data;
-	switch (client->client_type) {
-	case IPA_ETH_CLIENT_AQC107:
-	case IPA_ETH_CLIENT_AQC113:
-		tx_ep = IPA_CLIENT_AQC_ETHERNET_CONS;
-		rx_ep = IPA_CLIENT_AQC_ETHERNET_PROD;
-		break;
-	case IPA_ETH_CLIENT_RTK8111K:
-	case IPA_ETH_CLIENT_RTK8125B:
-		tx_ep = IPA_CLIENT_RTK_ETHERNET_CONS;
-		rx_ep = IPA_CLIENT_RTK_ETHERNET_PROD;
-		ipa3_eth_get_status(tx_ep, 5, &tx_stats);
-		ipa3_eth_get_status(rx_ep, 5, &rx_stats);
-		break;
-	default:
-		IPAERR("Not supported\n");
-	}
-	nbytes = scnprintf(dbg_buff, IPA_MAX_MSG_LEN,
-		"%s_RP=0x%x\n"
-		"%s_WP=0x%x\n"
-		"%s_SCRATCH5=0x%x\n",
-		ipa_clients_strings[tx_ep],
-		tx_stats.rp,
-		ipa_clients_strings[tx_ep],
-		tx_stats.wp,
-		ipa_clients_strings[tx_ep],
-		tx_stats.err);
-	cnt += nbytes;
-	nbytes = scnprintf(dbg_buff + cnt, IPA_MAX_MSG_LEN - cnt,
-		"%s_RP=0x%x\n"
-		"%s_WP=0x%x\n"
-		"%s_SCRATCH5=0x%x\n"
-		"%s_err:%u\n",
-		ipa_clients_strings[rx_ep],
-		rx_stats.rp,
-		ipa_clients_strings[rx_ep],
-		rx_stats.wp,
-		ipa_clients_strings[rx_ep],
-		rx_stats.err,
-		ipa_clients_strings[rx_ep],
-		rx_stats.err & 0xff);
-	cnt += nbytes;
-done:
-	return simple_read_from_buffer(ubuf, count, ppos, dbg_buff, cnt);
-}
-
-static const struct file_operations fops_ipa_eth_stats = {
-	.read = ipa3_eth_read_perf_status,
-	.open = ipa3_open_dbg,
-};
-static const struct file_operations fops_ipa_eth_client_status = {
-	.read = ipa3_eth_read_err_status,
-	.open = ipa3_open_dbg,
-};
-void ipa3_eth_debugfs_add_node(struct ipa_eth_client *client)
-{
-	struct dentry *file;
-	int type, inst_id;
-	char name[IPA_RESOURCE_NAME_MAX];
-
-	if (IS_ERR_OR_NULL(dent_eth)) {
-		IPAERR("debugs eth root not created\n");
-		return;
-	}
-
-	if (client == NULL) {
-		IPAERR_RL("invalid input\n");
-		return;
-	}
-
-	type = client->client_type;
-	inst_id = client->inst_id;
-	snprintf(name, IPA_RESOURCE_NAME_MAX,
-		"%s_%d_stats", ipa_eth_clients_strings[type], inst_id);
-	file = debugfs_create_file(name, IPA_READ_ONLY_MODE,
-		dent_eth, (void *)client, &fops_ipa_eth_stats);
-	if (!file) {
-		IPAERR("could not create hw_type file\n");
-		return;
-	}
-	snprintf(name, IPA_RESOURCE_NAME_MAX,
-		"%s_%d_status", ipa_eth_clients_strings[type], inst_id);
-	file = debugfs_create_file(name, IPA_READ_ONLY_MODE,
-		dent_eth, (void *)client, &fops_ipa_eth_client_status);
-	if (!file) {
-		IPAERR("could not create hw_type file\n");
-		goto fail;
-	}
-	return;
-fail:
-	debugfs_remove_recursive(dent_eth);
-}
-
 #else /* !CONFIG_DEBUG_FS */
+#define INVALID_NO_OF_CHAR (-1)
 void ipa3_debugfs_pre_init(void) {}
 void ipa3_debugfs_post_init(void) {}
 void ipa3_debugfs_remove(void) {}
-void ipa3_eth_debugfs_init(void) {}
-void ipa3_eth_debugfs_add(struct ipa_eth_client *client) {}
+int _ipa_read_ep_reg_v3_0(char *buf, int max_len, int pipe)
+{
+	return INVALID_NO_OF_CHAR;
+}
+int _ipa_read_ep_reg_v4_0(char *buf, int max_len, int pipe)
+{
+	return INVALID_NO_OF_CHAR;
+}
 #endif

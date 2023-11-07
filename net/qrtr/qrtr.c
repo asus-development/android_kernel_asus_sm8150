@@ -135,6 +135,15 @@ static DECLARE_RWSEM(qrtr_node_lock);
 static DEFINE_IDR(qrtr_ports);
 static DEFINE_MUTEX(qrtr_port_lock);
 
+/* backup buffers */
+#define QRTR_BACKUP_HI_NUM	5
+#define QRTR_BACKUP_HI_SIZE	SZ_16K
+#define QRTR_BACKUP_LO_NUM	20
+#define QRTR_BACKUP_LO_SIZE	SZ_1K
+static struct sk_buff_head qrtr_backup_lo;
+static struct sk_buff_head qrtr_backup_hi;
+static struct work_struct qrtr_backup_work;
+
 /**
  * struct qrtr_node - endpoint node
  * @ep_lock: lock for endpoint management and callbacks
@@ -201,6 +210,7 @@ static int qrtr_local_enqueue(struct qrtr_node *node, struct sk_buff *skb,
 static int qrtr_bcast_enqueue(struct qrtr_node *node, struct sk_buff *skb,
 			      int type, struct sockaddr_qrtr *from,
 			      struct sockaddr_qrtr *to, unsigned int flags);
+static void qrtr_handle_del_proc(struct sk_buff *skb);
 
 static void qrtr_log_tx_msg(struct qrtr_node *node, struct qrtr_hdr_v1 *hdr,
 			    struct sk_buff *skb)
@@ -648,7 +658,7 @@ static void qrtr_node_assign(struct qrtr_node *node, unsigned int nid)
 	 * cause APPS suspend problems and power drain issue.
 	 */
 	if (!node->ws && nid == 0)
-		node->ws = wakeup_source_register(name);
+		node->ws = wakeup_source_register(NULL, name);
 }
 
 /**
@@ -693,6 +703,59 @@ int qrtr_peek_pkt_size(const void *data)
 }
 EXPORT_SYMBOL(qrtr_peek_pkt_size);
 
+static void qrtr_alloc_backup(struct work_struct *work)
+{
+	struct sk_buff *skb;
+	int errcode;
+
+	while (skb_queue_len(&qrtr_backup_lo) < QRTR_BACKUP_LO_NUM) {
+		skb = alloc_skb_with_frags(sizeof(struct qrtr_hdr_v1),
+					   QRTR_BACKUP_LO_SIZE, 0, &errcode,
+					   GFP_KERNEL);
+		if (!skb)
+			break;
+		skb_queue_tail(&qrtr_backup_lo, skb);
+	}
+	while (skb_queue_len(&qrtr_backup_hi) < QRTR_BACKUP_HI_NUM) {
+		skb = alloc_skb_with_frags(sizeof(struct qrtr_hdr_v1),
+					   QRTR_BACKUP_HI_SIZE, 0, &errcode,
+					   GFP_KERNEL);
+		if (!skb)
+			break;
+		skb_queue_tail(&qrtr_backup_hi, skb);
+	}
+}
+
+static struct sk_buff *qrtr_get_backup(size_t len)
+{
+	struct sk_buff *skb = NULL;
+
+	if (len < QRTR_BACKUP_LO_SIZE)
+		skb = skb_dequeue(&qrtr_backup_lo);
+	else if (len < QRTR_BACKUP_HI_SIZE)
+		skb = skb_dequeue(&qrtr_backup_hi);
+
+	if (skb)
+		queue_work(system_unbound_wq, &qrtr_backup_work);
+
+	return skb;
+}
+
+static void qrtr_backup_init(void)
+{
+	skb_queue_head_init(&qrtr_backup_lo);
+	skb_queue_head_init(&qrtr_backup_hi);
+	INIT_WORK(&qrtr_backup_work, qrtr_alloc_backup);
+	queue_work(system_unbound_wq, &qrtr_backup_work);
+}
+
+static void qrtr_backup_deinit(void)
+{
+	cancel_work_sync(&qrtr_backup_work);
+	skb_queue_purge(&qrtr_backup_lo);
+	skb_queue_purge(&qrtr_backup_hi);
+}
+
 /**
  * qrtr_endpoint_post() - post incoming data
  * @ep: endpoint handle
@@ -717,8 +780,13 @@ int qrtr_endpoint_post(struct qrtr_endpoint *ep, const void *data, size_t len)
 		return -EINVAL;
 
 	skb = alloc_skb_with_frags(sizeof(*v1), len, 0, &errcode, GFP_ATOMIC);
-	if (!skb)
-		return -ENOMEM;
+	if (!skb) {
+		skb = qrtr_get_backup(len);
+		if (!skb) {
+			pr_err("qrtr: Unable to get skb with len:%lu\n", len);
+			return -ENOMEM;
+		}
+	}
 
 	skb_reserve(skb, sizeof(*v1));
 	cb = (struct qrtr_cb *)skb->cb;
@@ -973,6 +1041,8 @@ static void qrtr_node_rx_work(struct kthread_work *work)
 		} else if (cb->dst_node != qrtr_local_nid &&
 			   cb->type == QRTR_TYPE_DATA) {
 			qrtr_fwd_pkt(skb, cb);
+		} else if (cb->type == QRTR_TYPE_DEL_PROC) {
+			qrtr_handle_del_proc(skb);
 		} else {
 			ipc = qrtr_port_lookup(cb->dst_port);
 			if (!ipc) {
@@ -983,6 +1053,21 @@ static void qrtr_node_rx_work(struct kthread_work *work)
 			}
 		}
 	}
+}
+
+static void qrtr_handle_del_proc(struct sk_buff *skb)
+{
+	struct sockaddr_qrtr src = {AF_QIPCRTR, 0, QRTR_PORT_CTRL};
+	struct sockaddr_qrtr dst = {AF_QIPCRTR, qrtr_local_nid, QRTR_PORT_CTRL};
+	struct qrtr_ctrl_pkt pkt = {0,};
+
+	skb_copy_bits(skb, 0, &pkt, sizeof(pkt));
+	src.sq_node = le32_to_cpu(pkt.proc.node);
+
+	memset(&pkt, 0, sizeof(pkt));
+	pkt.cmd = cpu_to_le32(QRTR_TYPE_BYE);
+	skb_store_bits(skb, 0, &pkt, sizeof(pkt));
+	qrtr_local_enqueue(NULL, skb, QRTR_TYPE_BYE, &src, &dst, 0);
 }
 
 static void qrtr_hello_work(struct kthread_work *work)
@@ -1467,7 +1552,7 @@ static int qrtr_bcast_enqueue(struct qrtr_node *node, struct sk_buff *skb,
 	}
 	up_read(&qrtr_node_lock);
 
-	qrtr_local_enqueue(node, skb, type, from, to, flags);
+	qrtr_local_enqueue(NULL, skb, type, from, to, flags);
 
 	return 0;
 }
@@ -1522,20 +1607,21 @@ static int qrtr_sendmsg(struct socket *sock, struct msghdr *msg, size_t len)
 	node = NULL;
 	srv_node = NULL;
 	if (addr->sq_node == QRTR_NODE_BCAST) {
-		enqueue_fn = qrtr_bcast_enqueue;
-		if (addr->sq_port != QRTR_PORT_CTRL) {
+		if (addr->sq_port != QRTR_PORT_CTRL &&
+		    qrtr_local_nid != QRTR_NODE_BCAST) {
 			release_sock(sk);
-			return -EINVAL;
+			return -ENOTCONN;
 		}
+		enqueue_fn = qrtr_bcast_enqueue;
 	} else if (addr->sq_node == ipc->us.sq_node) {
 		enqueue_fn = qrtr_local_enqueue;
 	} else {
-		enqueue_fn = qrtr_node_enqueue;
 		node = qrtr_node_lookup(addr->sq_node);
 		if (!node) {
 			release_sock(sk);
 			return -ECONNRESET;
 		}
+		enqueue_fn = qrtr_node_enqueue;
 
 		if (ipc->state > QRTR_STATE_INIT && ipc->state != node->nid)
 			ipc->state = QRTR_STATE_MULTI;
@@ -1661,6 +1747,11 @@ static int qrtr_recvmsg(struct socket *sock, struct msghdr *msg,
 	rc = copied;
 
 	if (addr) {
+		/* There is an anonymous 2-byte hole after sq_family,
+		 * make sure to clear it.
+		 */
+		memset(addr, 0, sizeof(*addr));
+
 		addr->sq_family = AF_QIPCRTR;
 		addr->sq_node = cb->src_node;
 		addr->sq_port = cb->src_port;
@@ -1932,7 +2023,10 @@ static int __init qrtr_proto_init(void)
 
 	rtnl_register(PF_QIPCRTR, RTM_NEWADDR, qrtr_addr_doit, NULL, 0);
 
+	qrtr_backup_init();
+
 	return 0;
+
 }
 postcore_initcall(qrtr_proto_init);
 
@@ -1941,6 +2035,8 @@ static void __exit qrtr_proto_fini(void)
 	rtnl_unregister(PF_QIPCRTR, RTM_NEWADDR);
 	sock_unregister(qrtr_family.family);
 	proto_unregister(&qrtr_proto);
+
+	qrtr_backup_deinit();
 }
 module_exit(qrtr_proto_fini);
 

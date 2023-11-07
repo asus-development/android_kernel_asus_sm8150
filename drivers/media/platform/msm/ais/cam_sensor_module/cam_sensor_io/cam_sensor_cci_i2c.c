@@ -1,4 +1,4 @@
-/* Copyright (c) 2017-2018, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2017-2018,2020 The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -36,7 +36,7 @@ int32_t cam_cci_i2c_read(struct cam_sensor_cci_client *cci_client,
 	cci_ctrl.cfg.cci_i2c_read_cfg.data_type = data_type;
 	cci_ctrl.cfg.cci_i2c_read_cfg.data = buf;
 	cci_ctrl.cfg.cci_i2c_read_cfg.num_byte = data_type;
-	
+
 	rc = cam_cci_core_cfg(cci_client->cci_subdev, &cci_ctrl);
 	if (rc < 0) {
 		CAM_ERR(CAM_SENSOR, "rc = %d", rc);
@@ -88,17 +88,17 @@ int32_t cam_camera_cci_i2c_read_seq(struct cam_sensor_cci_client *cci_client,
 	cci_ctrl.cfg.cci_i2c_read_cfg.data = buf;
 	cci_ctrl.cfg.cci_i2c_read_cfg.num_byte = num_byte;
 	cci_ctrl.status = -EFAULT;
-	
+
 	rc = cam_cci_core_cfg(cci_client->cci_subdev, &cci_ctrl);
 	CAM_DBG(CAM_SENSOR, "addr = 0x%x, rc = %d", addr, rc);
-	
+
 	if (!rc) {
 		for (i = 0; i < num_byte; i++) {
 			data[i] = buf[i];
 			CAM_DBG(CAM_SENSOR, "Byte %d: Data: 0x%x",
 				i, data[i]);
 		}
- 	}
+	}
 
 	kfree(buf);
 	return rc;
@@ -128,7 +128,7 @@ static int32_t cam_cci_i2c_write_table_cmd(
 	cci_ctrl.cfg.cci_i2c_write_cfg.data_type = write_setting->data_type;
 	cci_ctrl.cfg.cci_i2c_write_cfg.addr_type = write_setting->addr_type;
 	cci_ctrl.cfg.cci_i2c_write_cfg.size = write_setting->size;
-	
+
 	rc = cam_cci_core_cfg(cci_client->cci_subdev, &cci_ctrl);
 	if (rc < 0) {
 		CAM_ERR(CAM_SENSOR, "Failed rc = %d", rc);
@@ -238,6 +238,6 @@ int32_t cam_sensor_cci_i2c_util(struct cam_sensor_cci_client *cci_client,
 	if (rc < 0) {
 		CAM_ERR(CAM_SENSOR, "Failed rc = %d", rc);
 	}
-	
+
 	return rc;
 }

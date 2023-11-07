@@ -10,7 +10,6 @@
  * GNU General Public License for more details.
  */
 
-#include <linux/atomic.h>
 #include <linux/debugfs.h>
 #include <linux/device.h>
 #include <linux/err.h>
@@ -22,7 +21,6 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/of.h>
-#include <linux/of_device.h>
 #include <linux/of_address.h>
 #include <linux/platform_device.h>
 #include <linux/pwm.h>
@@ -178,7 +176,6 @@ enum haptics_custom_effect_param {
 #define REG_HAP_SEC_ACCESS		0xD0
 #define REG_HAP_PERPH_RESET_CTL3	0xDA
 
-#define STRONG_MAGNITUDE                0x7fff
 struct qti_hap_effect {
 	int			id;
 	u8			*pattern;
@@ -226,7 +223,6 @@ struct qti_hap_chip {
 	struct hrtimer			stop_timer;
 	struct hrtimer			hap_disable_timer;
 	struct dentry			*hap_debugfs;
-	struct mutex			param_lock;
 	struct notifier_block		twm_nb;
 	spinlock_t			bus_lock;
 	ktime_t				last_sc_time;
@@ -238,7 +234,6 @@ struct qti_hap_chip {
 	bool				perm_disable;
 	bool				play_irq_en;
 	bool				vdd_enabled;
-	bool				module_en;
 	bool				twm_state;
 	bool				haptics_ext_pin_twm;
 };
@@ -255,118 +250,15 @@ static struct hap_addr_val twm_ext_cfg[] = {
 	{REG_HAP_EN_CTL1, 0x80}, /* Enable haptics driver */
 };
 
-extern struct qti_hap_chip *qti_data;
-
-struct qti_hap_effect *constant_effect;
+static struct hap_addr_val twm_cfg[] = {
+	{REG_HAP_PLAY, 0x00}, /* Stop playing haptics waveform */
+	{REG_HAP_SEL, 0x00}, /* Configure for cmd mode */
+	{REG_HAP_EN_CTL1, 0x00}, /* Enable haptics driver */
+	{REG_HAP_PERPH_RESET_CTL3, 0x0D}, /* Disable SHUTDOWN1_RB reset */
+};
 
 static int wf_repeat[8] = {1, 2, 4, 8, 16, 32, 64, 128};
 static int wf_s_repeat[4] = {1, 2, 4, 8};
-
-static int qti_haptics_playback(struct input_dev *dev, int effect_id, int val);
-static int qti_haptics_lra_auto_res_enable(struct qti_hap_chip *chip, bool en);
-static int qti_haptics_module_en(struct qti_hap_chip *chip, bool en);
-static int qti_haptics_play(struct qti_hap_chip *chip, bool play);
-static int qti_haptics_load_constant_waveform(struct qti_hap_chip *chip);
-static void qti_haptics_set_gain(struct input_dev *dev, u16 gain);
-static int qti_haptics_erase(struct input_dev *dev, int effect_id);
-static int qti_haptics_config_vmax(struct qti_hap_chip *chip, int vmax_mv);
-
-static ssize_t qpnp_haptics_show_state(struct device *dev,
-		struct device_attribute *attr, char *buf)
-{
-	struct qti_hap_chip *qti_data = dev_get_drvdata(dev);
-
-	return snprintf(buf, PAGE_SIZE, "%d\n", qti_data->module_en);
-}
-
-static ssize_t qpnp_haptics_store_state(struct device *dev,
-		struct device_attribute *attr, const char *buf, size_t count)
-{
-	return -EPERM;
-}
-//========================
-static int test_vmax_mv = 2140;
-module_param(test_vmax_mv, int, S_IRUGO | S_IWUSR);
-MODULE_PARM_DESC(test_vmax_mv, "test_vmax_mv");
-static int test_play_rate_us = 5100;
-module_param(test_play_rate_us, int, S_IRUGO | S_IWUSR);
-MODULE_PARM_DESC(test_play_rate_us, "test_play_rate_us");
-static int test_duration_ms = 25000;
-module_param(test_duration_ms, int, S_IRUGO | S_IWUSR);
-MODULE_PARM_DESC(test_duration_ms, "test_duration_ms");
-//========================
-static ssize_t vibrator_on_show(struct device *dev,
-		struct device_attribute *attr, char *buf)
-{
-	return -EPERM;
-}
-
-static ssize_t vibrator_on_store(struct device *dev,
-		struct device_attribute *attr, const char *buf, size_t count)
-{
-	struct qti_hap_chip *qti_data = dev_get_drvdata(dev);
-	u32 val;
-	int rc;
-	ktime_t rem;
-	s64 time_us;
-
-	printk("[vibrator] %s \n",__func__);
-	rc = kstrtouint(buf, 0, &val);
-	if (rc < 0)
-		return rc;
-
-	/* setting 0 on duration is NOP for now */
-	switch(val)
-	{
-		case 0:
-			printk("[vibrator] %s : vibrator_off !!! \n",__func__);
-			rc = qti_haptics_playback(qti_data->input_dev, 0, 0);
-			rc =  qti_haptics_erase(qti_data->input_dev, 0);
-			break;
-		case 1:
-	if (hrtimer_active(&qti_data->hap_disable_timer)) {
-		rem = hrtimer_get_remaining(&qti_data->hap_disable_timer);
-		time_us = ktime_to_us(rem);
-		dev_dbg(qti_data->dev, "waiting for playing clear sequence: %lld us\n", time_us);
-		usleep_range(time_us, time_us + 100);
-	}
-
-	//VMAX_MIN_PLAY_TIME_US		20000
-	//echo 25000
-
-	mutex_lock(&qti_data->param_lock);
-
-			qti_data->play.length_us = test_duration_ms * USEC_PER_MSEC;
-			qti_data->play.vmax_mv = test_vmax_mv;
-			qti_data->config.vmax_mv = test_vmax_mv;
-			qti_data->config.play_rate_us = test_play_rate_us;
-
-	printk("[vibrator] %s :  length = %dus, vmax_mv=%d \n",__func__,
-		qti_data->play.length_us, qti_data->play.vmax_mv);
-
-	rc = qti_haptics_load_constant_waveform(qti_data);
-	if (rc < 0) {
-		dev_err(qti_data->dev, "Play constant waveform failed, rc=%d\n",rc);
-		return rc;
-	}
-	mutex_unlock(&qti_data->param_lock);
-
-	printk("[vibrator] %s : vibrator_on !!! \n",__func__);
-	rc = qti_haptics_playback(qti_data->input_dev, 0, 1);
-			//rc = qti_haptics_config_vmax(qti_data, qti_data->play.vmax_mv);
-			break;
-		default:
-			printk("[vibrator] %s : unsupport  command %d!! \n",__func__,val);
-			break;
-	}
-	return count;
-}
-
-
-static struct device_attribute vibrator_attrs[] = {
-	__ATTR(vibrator_on, S_IRUGO|S_IWUSR, vibrator_on_show, vibrator_on_store),
-	__ATTR(state, S_IRUGO|S_IWUSR, qpnp_haptics_show_state, qpnp_haptics_store_state),
-};
 
 static int twm_sys_enable;
 module_param_named(
@@ -610,7 +502,7 @@ static int qti_haptics_module_en(struct qti_hap_chip *chip, bool en)
 		dev_err(chip->dev, "%s haptics failed, rc=%d\n",
 				en ? "enable" : "disable", rc);
 
-        chip->module_en = en;
+
 	return rc;
 }
 
@@ -781,13 +673,6 @@ static int qti_haptics_load_constant_waveform(struct qti_hap_chip *chip)
 				return rc;
 		}
 
-		//add for constant send brake
-		/* Set brake pattern in the effect */
-		rc = qti_haptics_config_brake(chip, constant_effect->brake);
-		if (rc < 0)
-			return rc;
-
-
 		/* Set WF_SOURCE to VMAX */
 		rc = qti_haptics_config_wf_src(chip, INT_WF_VMAX);
 		if (rc < 0)
@@ -804,13 +689,6 @@ static int qti_haptics_load_constant_waveform(struct qti_hap_chip *chip)
 		play->playing_pos = 0;
 		/* Format and config waveform in patterns */
 		construct_constant_waveform_in_pattern(play);
-
-		//add for constant send brake
-		/* Set brake pattern in the effect */
-		rc = qti_haptics_config_brake(chip, constant_effect->brake);
-		if (rc < 0)
-			return rc;
-
 		rc = qti_haptics_config_wf_buffer(chip);
 		if (rc < 0)
 			return rc;
@@ -973,8 +851,6 @@ static inline void get_play_length(struct qti_hap_play_info *play,
 	struct qti_hap_effect *effect = play->effect;
 	int tmp;
 
-	printk("[vibrator] %s : pattern_length=%d, wf_s_repeat_n=%d, wf_repeat_n=%d, brake_pattern_length=%d\n",
-		__func__, effect->pattern_length, effect->wf_s_repeat_n, effect->wf_repeat_n, effect->brake_pattern_length);
 	tmp = effect->pattern_length * effect->play_rate_us;
 	tmp *= wf_s_repeat[effect->wf_s_repeat_n];
 	tmp *= wf_repeat[effect->wf_repeat_n];
@@ -1011,8 +887,7 @@ static int qti_haptics_upload_effect(struct input_dev *dev,
 		play->vmax_mv = tmp / 0x7fff;
 		dev_dbg(chip->dev, "upload constant effect, length = %dus, vmax_mv=%d\n",
 				play->length_us, play->vmax_mv);
-                printk("[vibrator] %s - FF_CONSTANT : time = %d us, level=%d(%d%%), vmax_mv=%d\n",
-				__func__, play->length_us, level, level*100/0x7fff, play->vmax_mv);
+
 		rc = qti_haptics_load_constant_waveform(chip);
 		if (rc < 0) {
 			dev_err(chip->dev, "Play constant waveform failed, rc=%d\n",
@@ -1051,9 +926,6 @@ static int qti_haptics_upload_effect(struct input_dev *dev,
 
 		dev_dbg(chip->dev, "upload effect %d, vmax_mv=%d\n",
 				chip->predefined[i].id, play->vmax_mv);
-		printk("[vibrator] %s - FF_PERIODIC : effect=%d, level=%d(%d%%), vmax_mv=%d \n",
-				__func__, chip->predefined[i].id, level, level*100/0x7fff, play->vmax_mv);
-
 		rc = qti_haptics_load_predefined_effect(chip, i);
 		if (rc < 0) {
 			dev_err(chip->dev, "Play predefined effect %d failed, rc=%d\n",
@@ -1062,7 +934,6 @@ static int qti_haptics_upload_effect(struct input_dev *dev,
 		}
 
 		get_play_length(play, &play->length_us);
-		printk("[vibrator] %s - FF_PERIODIC : length = %dus\n", __func__, play->length_us);
 		data[CUSTOM_DATA_TIMEOUT_SEC_IDX] =
 			play->length_us / USEC_PER_SEC;
 		data[CUSTOM_DATA_TIMEOUT_MSEC_IDX] =
@@ -1196,20 +1067,30 @@ static void qti_haptics_set_gain(struct input_dev *dev, u16 gain)
 	qti_haptics_config_vmax(chip, play->vmax_mv);
 }
 
-static int qti_haptics_twm_config(struct qti_hap_chip *chip)
+static int qti_haptics_twm_config(struct qti_hap_chip *chip, bool ext_pin)
 {
-	int rc, i;
+	int rc = 0, i;
 
-	for (i = 0; i < ARRAY_SIZE(twm_ext_cfg); i++) {
-		rc = qti_haptics_write(chip, twm_ext_cfg[i].addr,
-					&twm_ext_cfg[i].value, 1);
-		if (rc < 0) {
-			dev_err(chip->dev, "Haptics TWM config failed, rc=%d\n",
-				rc);
-			return rc;
+	if (ext_pin) {
+		for (i = 0; i < ARRAY_SIZE(twm_ext_cfg); i++) {
+			rc = qti_haptics_write(chip, twm_ext_cfg[i].addr,
+						&twm_ext_cfg[i].value, 1);
+			if (rc < 0)
+				break;
+		}
+	} else {
+		for (i = 0; i < ARRAY_SIZE(twm_cfg); i++) {
+			rc = qti_haptics_write(chip, twm_cfg[i].addr,
+						&twm_cfg[i].value, 1);
+			if (rc < 0)
+				break;
 		}
 	}
-	pr_debug("Enabled haptics for TWM mode\n");
+
+	if (rc < 0)
+		pr_err("Failed to write twm_config rc=%d\n", rc);
+	else
+		pr_debug("Enabled haptics for TWM mode\n");
 
 	return 0;
 }
@@ -1220,7 +1101,6 @@ static int qti_haptics_hw_init(struct qti_hap_chip *chip)
 	u8 addr, val, mask;
 	int rc = 0;
 
-	printk("[vibrator] %s \n",__func__);
 	/* Config actuator type */
 	addr = REG_HAP_CFG1;
 	val = config->act_type;
@@ -1253,8 +1133,7 @@ static int qti_haptics_hw_init(struct qti_hap_chip *chip)
 	/* Set ZX_CFG */
 	addr = REG_HAP_ZX_CFG;
 	mask = HAP_ZX_DET_DEB_MASK;
-	//val = ZX_DET_DEB_80US;
-	val = ZX_DET_DEB_10US;
+	val = ZX_DET_DEB_80US;
 	rc = qti_haptics_masked_write(chip, addr, mask, val);
 	if (rc < 0) {
 		dev_err(chip->dev, "write ZX_CFG failed, rc=%d\n", rc);
@@ -1295,10 +1174,9 @@ static int qti_haptics_hw_init(struct qti_hap_chip *chip)
 	}
 
 	addr = REG_HAP_AUTO_RES_CFG;
-	//mask = HAP_AUTO_RES_MODE_BIT | HAP_CAL_EOP_EN_BIT | HAP_CAL_PERIOD_MASK;
-	mask = HAP_AUTO_RES_MODE_BIT | HAP_CAL_EOP_EN_BIT | HAP_CAL_PERIOD_MASK | BIT(4);
+	mask = HAP_AUTO_RES_MODE_BIT | HAP_CAL_EOP_EN_BIT | HAP_CAL_PERIOD_MASK;
 	val = config->lra_auto_res_mode << HAP_AUTO_RES_MODE_SHIFT;
-	//val |= HAP_CAL_EOP_EN_BIT | HAP_CAL_OPT3_EVERY_8_PERIOD;
+	val |= HAP_CAL_EOP_EN_BIT | HAP_CAL_OPT3_EVERY_8_PERIOD;
 	rc = qti_haptics_masked_write(chip, addr, mask, val);
 	if (rc < 0) {
 		dev_err(chip->dev, "set AUTO_RES_CFG failed, rc=%d\n", rc);
@@ -1306,10 +1184,9 @@ static int qti_haptics_hw_init(struct qti_hap_chip *chip)
 	}
 
 	addr = REG_HAP_AUTO_RES_CTRL;
-	//val = HAP_AUTO_RES_EN_BIT | HAP_SEL_AUTO_RES_PERIOD |
-	//	AUTO_RES_CNT_ERR_DELTA(2) | HAP_AUTO_RES_ERR_RECOVERY_BIT |
-	//	AUTO_RES_EN_DLY(4);
-	val = HAP_AUTO_RES_EN_BIT | AUTO_RES_EN_DLY(4);
+	val = HAP_AUTO_RES_EN_BIT | HAP_SEL_AUTO_RES_PERIOD |
+		AUTO_RES_CNT_ERR_DELTA(2) | HAP_AUTO_RES_ERR_RECOVERY_BIT |
+		AUTO_RES_EN_DLY(4);
 	rc = qti_haptics_write(chip, addr, &val, 1);
 	if (rc < 0) {
 		dev_err(chip->dev, "set AUTO_RES_CTRL failed, rc=%d\n",
@@ -1392,7 +1269,6 @@ static int qti_haptics_parse_dt(struct qti_hap_chip *chip)
 	const char *str;
 	int rc = 0, tmp, i = 0, j, m;
 
-	printk("[vibrator] %s \n",__func__);
 	rc = of_property_read_u32(node, "reg", &tmp);
 	if (rc < 0) {
 		dev_err(chip->dev, "Failed to reg base, rc=%d\n", rc);
@@ -1507,29 +1383,7 @@ static int qti_haptics_parse_dt(struct qti_hap_chip *chip)
 			sizeof(u8), GFP_KERNEL);
 	if (!chip->constant.pattern)
 		return -ENOMEM;
-//====================================
-//add constant brake settings
-		effect = constant_effect;
-		tmp = of_property_count_elems_of_size(node,
-				"qcom,wf-brake-pattern", sizeof(u8));
 
-		if (tmp > HAP_BRAKE_PATTERN_MAX) {
-			dev_err(chip->dev, "wf-brake-pattern shouldn't be more than %d bytes\n",
-					HAP_BRAKE_PATTERN_MAX);
-			return -EINVAL;
-		}
-
-		rc = of_property_read_u8_array(node,
-				"qcom,wf-brake-pattern", effect->brake, tmp);
-		if (rc < 0) {
-			dev_err(chip->dev, "Failed to get wf-brake-pattern, rc=%d\n",
-					rc);
-			return rc;
-		}
-
-		effect->brake_pattern_length = tmp;
-		verify_brake_setting(effect);
-//====================================
 	tmp = of_get_available_child_count(node);
 	if (tmp == 0)
 		return 0;
@@ -1720,45 +1574,7 @@ static int vmax_dbgfs_write(void *data, u64 val)
 
 	return 0;
 }
-//================================
-//add for tune constant play_rate_us & vmax
-static int play_rate_dbgfs_read_2(void *data, u64 *val)
-{
-	struct qti_hap_config *config = (struct qti_hap_config *)data;
-	*val = config->play_rate_us;
-	return 0;
-}
 
-static int play_rate_dbgfs_write_2(void *data, u64 val)
-{
-	struct qti_hap_config *config = (struct qti_hap_config *)data;
-	if (val > HAP_PLAY_RATE_US_MAX)
-		val = HAP_PLAY_RATE_US_MAX;
-
-	config->play_rate_us = val;
-
-	return 0;
-}
-
-static int vmax_dbgfs_read_2(void *data, u64 *val)
-{
-	struct qti_hap_config *config = (struct qti_hap_config *)data;
-	*val = config->vmax_mv;
-
-	return 0;
-}
-
-static int vmax_dbgfs_write_2(void *data, u64 val)
-{
-	struct qti_hap_config *config = (struct qti_hap_config *)data;
-	if (val > HAP_VMAX_MV_MAX)
-		val = HAP_VMAX_MV_MAX;
-
-	config->vmax_mv = val;
-
-	return 0;
-}
-//================================
 static int wf_repeat_n_dbgfs_read(void *data, u64 *val)
 {
 	struct qti_hap_effect *effect = (struct qti_hap_effect *)data;
@@ -1840,13 +1656,7 @@ DEFINE_SIMPLE_ATTRIBUTE(wf_s_repeat_n_debugfs_ops,  wf_s_repeat_n_dbgfs_read,
 		wf_s_repeat_n_dbgfs_write, "%llu\n");
 DEFINE_SIMPLE_ATTRIBUTE(auto_res_debugfs_ops,  auto_res_dbgfs_read,
 		auto_res_dbgfs_write, "%llu\n");
-//================================
-//add for tune constant play_rate_us & vmax
-DEFINE_SIMPLE_ATTRIBUTE(play_rate_debugfs_ops_2,  play_rate_dbgfs_read_2,
-		play_rate_dbgfs_write_2, "%llu\n");
-DEFINE_SIMPLE_ATTRIBUTE(vmax_debugfs_ops_2, vmax_dbgfs_read_2,
-		vmax_dbgfs_write_2, "%llu\n");
-//===============================
+
 #define CHAR_PER_PATTERN 8
 static ssize_t brake_pattern_dbgfs_read(struct file *filep,
 		char __user *buf, size_t count, loff_t *ppos)
@@ -2074,7 +1884,6 @@ static int qti_haptics_add_debugfs(struct qti_hap_chip *chip)
 	char str[12] = {0};
 	int i, rc = 0;
 
-	printk("[vibrator] %s start\n",__func__);
 	hap_dir = debugfs_create_dir("haptics", NULL);
 	if (!hap_dir) {
 		pr_err("create haptics debugfs directory failed\n");
@@ -2097,38 +1906,7 @@ static int qti_haptics_add_debugfs(struct qti_hap_chip *chip)
 			goto cleanup;
 		}
 	}
-//=====================================
-//add for tune constant play_rate_us & vmax & brake
-{
-	struct qti_hap_effect *effect;
-	struct qti_hap_config *config = &chip->config;
-	struct dentry *file;
 
-		snprintf(str, ARRAY_SIZE(str), "constant", i);
-		effect_dir = debugfs_create_dir(str, hap_dir);
-
-		effect=constant_effect;
-		file = debugfs_create_file("brake", 0644, effect_dir,
-			effect, &brake_pattern_dbgfs_ops);
-	if (!file) {
-		pr_err("create brake debugfs node failed\n");
-		return -ENOMEM;
-	}
-
-	file = debugfs_create_file("play_rate_us", 0644, effect_dir,
-			config, &play_rate_debugfs_ops_2);
-	if (!file) {
-		pr_err("create play-rate debugfs node failed\n");
-		return -ENOMEM;
-	}
-		file = debugfs_create_file("vmax_mv", 0644, effect_dir,
-			config, &vmax_debugfs_ops_2);
-	if (!file) {
-		pr_err("create vmax debugfs node failed\n");
-		return -ENOMEM;
-	}
-}
-//=====================================
 	chip->hap_debugfs = hap_dir;
 	return 0;
 
@@ -2143,9 +1921,8 @@ static int qti_haptics_probe(struct platform_device *pdev)
 	struct qti_hap_chip *chip;
 	struct input_dev *input_dev;
 	struct ff_device *ff;
-	int rc = 0, effect_count_max, i;
+	int rc = 0, effect_count_max;
 
-	printk("[vibrator] %s : start !!!\n",__func__);
 	chip = devm_kzalloc(&pdev->dev, sizeof(*chip), GFP_KERNEL);
 	if (!chip)
 		return -ENOMEM;
@@ -2154,7 +1931,6 @@ static int qti_haptics_probe(struct platform_device *pdev)
 	if (!input_dev)
 		return -ENOMEM;
 
-	constant_effect = devm_kzalloc(&pdev->dev, sizeof(*constant_effect), GFP_KERNEL);
 	chip->pdev = pdev;
 	chip->dev = &pdev->dev;
 	chip->regmap = dev_get_regmap(chip->dev->parent, NULL);
@@ -2170,7 +1946,6 @@ static int qti_haptics_probe(struct platform_device *pdev)
 	}
 
 	spin_lock_init(&chip->bus_lock);
-	mutex_init(&chip->param_lock);
 
 	rc = qti_haptics_hw_init(chip);
 	if (rc < 0) {
@@ -2243,32 +2018,14 @@ static int qti_haptics_probe(struct platform_device *pdev)
 	}
 
 	dev_set_drvdata(chip->dev, chip);
-
-	for (i = 0; i < ARRAY_SIZE(vibrator_attrs); i++) {
-		rc = sysfs_create_file(&pdev->dev.kobj,
-				&vibrator_attrs[i].attr);
-		if (rc < 0) {
-			dev_err(chip->dev, "Error in creating sysfs file, rc=%d\n",
-				rc);
-			goto sysfs_fail;
-		}
-	}
-	printk("[vibrator] %s : create sysfs ok\n", __func__);
-
-//#ifdef CONFIG_DEBUG_FS
+#ifdef CONFIG_DEBUG_FS
 	rc = qti_haptics_add_debugfs(chip);
 	if (rc < 0)
 		dev_dbg(chip->dev, "create debugfs failed, rc=%d\n", rc);
-//#endif
-	printk("[vibrator] %s : end !!!\n",__func__);
+#endif
 	return 0;
 
-sysfs_fail:
-	for (--i; i >= 0; i--)
-		sysfs_remove_file(&pdev->dev.kobj,
-				&vibrator_attrs[i].attr);
 destroy_ff:
-	mutex_destroy(&chip->param_lock);
 	input_ff_destroy(chip->input_dev);
 	qpnp_misc_twm_notifier_unregister(&chip->twm_nb);
 	return rc;
@@ -2281,7 +2038,6 @@ static int qti_haptics_remove(struct platform_device *pdev)
 #ifdef CONFIG_DEBUG_FS
 	debugfs_remove_recursive(chip->hap_debugfs);
 #endif
-	mutex_destroy(&chip->param_lock);
 	input_ff_destroy(chip->input_dev);
 	qpnp_misc_twm_notifier_unregister(&chip->twm_nb);
 	dev_set_drvdata(chip->dev, NULL);
@@ -2293,7 +2049,6 @@ static void qti_haptics_shutdown(struct platform_device *pdev)
 {
 	struct qti_hap_chip *chip = dev_get_drvdata(&pdev->dev);
 	int rc;
-	bool enable_haptics_twm;
 
 	dev_dbg(chip->dev, "Shutdown!\n");
 
@@ -2309,10 +2064,8 @@ static void qti_haptics_shutdown(struct platform_device *pdev)
 		chip->vdd_enabled = false;
 	}
 
-	enable_haptics_twm = chip->haptics_ext_pin_twm && twm_sys_enable;
-
-	if (chip->twm_state == PMIC_TWM_ENABLE && enable_haptics_twm) {
-		rc = qti_haptics_twm_config(chip);
+	if (chip->twm_state == PMIC_TWM_ENABLE && twm_sys_enable) {
+		rc = qti_haptics_twm_config(chip, chip->haptics_ext_pin_twm);
 		if (rc < 0)
 			pr_err("Haptics TWM config failed rc=%d\n", rc);
 	}

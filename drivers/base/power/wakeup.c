@@ -15,22 +15,15 @@
 #include <linux/seq_file.h>
 #include <linux/debugfs.h>
 #include <linux/pm_wakeirq.h>
-#include <linux/types.h>
+#include <linux/irq.h>
+#include <linux/interrupt.h>
+#include <linux/wakeup_reason.h>
 #include <trace/events/power.h>
 #include <linux/irq.h>
 #include <linux/interrupt.h>
 #include <linux/irqdesc.h>
-#include <linux/wakeup_reason.h>
 
 #include "power.h"
-
-extern int pmsp_flag;
-extern int pm_stay_unattended_period;
-extern void pmsp_print(void);
-extern void print_pm_cpuinfo(void);
-//ASUS_BSP +++ [PM]Extern this flag to check dpm_suspend has been callback for resume_console
-extern unsigned int pm_pwrcs_ret;
-//ASUS_BSP --- [PM]Extern this flag to check dpm_suspend has been callback for resume_console
 
 #ifndef CONFIG_SUSPEND
 suspend_state_t pm_suspend_target_state;
@@ -909,7 +902,7 @@ void pm_print_active_wakeup_sources(void)
 	srcuidx = srcu_read_lock(&wakeup_srcu);
 	list_for_each_entry_rcu(ws, &wakeup_sources, entry) {
 		if (ws->active) {
-			pr_info("[PM] active wakeup source: %s\n", ws->name);
+			pr_debug("active wakeup source: %s\n", ws->name);
 			active = 1;
 		} else if (!active &&
 			   (!last_activity_ws ||
@@ -920,48 +913,11 @@ void pm_print_active_wakeup_sources(void)
 	}
 
 	if (!active && last_activity_ws)
-		pr_info("last active wakeup source: %s\n",
+		pr_debug("last active wakeup source: %s\n",
 			last_activity_ws->name);
 	srcu_read_unlock(&wakeup_srcu, srcuidx);
 }
 EXPORT_SYMBOL_GPL(pm_print_active_wakeup_sources);
-
-void asus_uts_print_active_locks(void)
-{
-	struct wakeup_source *ws;
-	int wl_active_cnt = 0;
-	int srcuidx;
-
-	srcuidx = srcu_read_lock(&wakeup_srcu);
-	list_for_each_entry_rcu(ws, &wakeup_sources, entry) {
-		if (ws->active) {
-			wl_active_cnt++;
-			printk("[PM] active wake lock %s\n", ws->name);
-			ASUSEvtlog("[PM] active wake lock: %s\n", ws->name);
-
-			if (pmsp_flag == 1) {
-				pmsp_print();
-				printk("[PM] pm_stay_unattended_period: %d\n",
-						pm_stay_unattended_period);
-
-				if( pm_stay_unattended_period >= PM_UNATTENDED_TIMEOUT * 3 ) {
-					pm_stay_unattended_period = 0;
-					print_pm_cpuinfo();
-				}
-			}
-			 pmsp_flag = 0;
-		}
-	}
-
-	if (wl_active_cnt == 0) {
-		printk("[PM] all wakelock are inactive\n");
-		ASUSEvtlog("[PM] all wakelock are inactive\n");
-	}
-
-	srcu_read_unlock(&wakeup_srcu, srcuidx);
-	return;
-}
-EXPORT_SYMBOL(asus_uts_print_active_locks);
 
 /**
  * pm_wakeup_pending - Check if power transition in progress should be aborted.
@@ -975,6 +931,7 @@ bool pm_wakeup_pending(void)
 {
 	unsigned long flags;
 	bool ret = false;
+	char suspend_abort[MAX_SUSPEND_ABORT_LEN];
 
 	spin_lock_irqsave(&events_lock, flags);
 	if (events_check_enabled) {
@@ -987,8 +944,10 @@ bool pm_wakeup_pending(void)
 	spin_unlock_irqrestore(&events_lock, flags);
 
 	if (ret) {
-		pr_info("PM: Wakeup pending, aborting suspend\n");
-		pm_print_active_wakeup_sources();
+		pm_get_active_wakeup_sources(suspend_abort,
+					     MAX_SUSPEND_ABORT_LEN);
+		log_suspend_abort_reason(suspend_abort);
+		pr_info("PM: %s\n", suspend_abort);
 	}
 
 	return ret || atomic_read(&pm_abort_suspend) > 0;
@@ -1026,11 +985,9 @@ void pm_system_irq_wakeup(unsigned int irq_number)
 			else if (desc->action && desc->action->name)
 				name = desc->action->name;
 
-			//pr_warn("%s: %d triggered %s\n", __func__,
-			//		irq_number, name);
-			ASUSEvtlog("[PM] IRQs triggered: %d %s\n", irq_number, name);
-			log_wakeup_reason(irq_number);
-			pm_pwrcs_ret = 0; //Don't print gic_show_resume_irq to ASUSEvtlog if here already shows
+			pr_warn("%s: %d triggered %s\n", __func__,
+					irq_number, name);
+
 		}
 		pm_wakeup_irq = irq_number;
 		pm_system_wakeup();

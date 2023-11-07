@@ -17,7 +17,7 @@
 #include "trinketp-iot-usbc-idp.dtsi"
 
 / {
-	model = "Qualcomm Technologies, Inc. TRINKET IOT USBC Audio IDP";
-	compatible = "qcom,trinketp-iot-idp", "qcom,trinketp-iot", "qcom,idp";
+	model = "Qualcomm Technologies, Inc. TRINKETP IOT USBC Audio IDP";
+	compatible = "qcom,trinketp-iot-idp", "qcom,trinket-iot", "qcom,idp";
 	qcom,board-id = <34 2>;
 };

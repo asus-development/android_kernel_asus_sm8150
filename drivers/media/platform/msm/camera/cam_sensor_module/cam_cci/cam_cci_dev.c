@@ -1,4 +1,4 @@
-/* Copyright (c) 2017-2019, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2017-2020, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -105,7 +105,7 @@ irqreturn_t cam_cci_irq(int irq_num, void *data)
 		(!rd_done_th_assert)) {
 		cci_dev->cci_master_info[MASTER_0].status = 0;
 		rd_done_th_assert = true;
-		if (cci_dev->is_burst_read[MASTER_0])
+		if (cci_dev->is_burst_read)
 			complete(
 			&cci_dev->cci_master_info[MASTER_0].th_complete);
 		complete(&cci_dev->cci_master_info[MASTER_0].rd_done);
@@ -161,7 +161,7 @@ irqreturn_t cam_cci_irq(int irq_num, void *data)
 		(!rd_done_th_assert)) {
 		cci_dev->cci_master_info[MASTER_1].status = 0;
 		rd_done_th_assert = true;
-		if (cci_dev->is_burst_read[MASTER_1])
+		if (cci_dev->is_burst_read)
 			complete(
 			&cci_dev->cci_master_info[MASTER_1].th_complete);
 		complete(&cci_dev->cci_master_info[MASTER_1].rd_done);
@@ -403,8 +403,7 @@ static int cam_cci_platform_probe(struct platform_device *pdev)
 		sizeof(new_cci_dev->device_name));
 	new_cci_dev->v4l2_dev_str.name =
 		new_cci_dev->device_name;
-	new_cci_dev->v4l2_dev_str.sd_flags =
-		V4L2_SUBDEV_FL_HAS_EVENTS;
+	new_cci_dev->v4l2_dev_str.sd_flags = V4L2_SUBDEV_FL_HAS_EVENTS;
 	new_cci_dev->v4l2_dev_str.ent_function =
 		CAM_CCI_DEVICE_TYPE;
 	new_cci_dev->v4l2_dev_str.token =

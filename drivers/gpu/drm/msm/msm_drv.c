@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2021, The Linux Foundation. All rights reserved.
  * Copyright (C) 2013 Red Hat
  * Author: Rob Clark <robdclark@gmail.com>
  *
@@ -49,6 +49,7 @@
 #include "msm_kms.h"
 #include "sde_wb.h"
 #include "sde_dbg.h"
+#include <drm/drm_client.h>
 
 /*
  * MSM driver version:
@@ -60,7 +61,7 @@
 #define MSM_VERSION_MINOR	2
 #define MSM_VERSION_PATCHLEVEL	0
 
-int g_msm_drv_shutdown_in_progress = 0;
+static DEFINE_MUTEX(msm_release_lock);
 
 static void msm_fb_output_poll_changed(struct drm_device *dev)
 {
@@ -289,8 +290,6 @@ static int msm_drm_uninit(struct device *dev)
 	struct msm_gpu *gpu = priv->gpu;
 	int i;
 
-	printk("[Display] msm_drm_uninit\n");
-
 	/* clean up display commit/event worker threads */
 	for (i = 0; i < priv->num_crtcs; i++) {
 		if (priv->disp_thread[i].thread) {
@@ -313,6 +312,7 @@ static int msm_drm_uninit(struct device *dev)
 	drm_mode_config_cleanup(ddev);
 
 	if (priv->registered) {
+		drm_client_dev_unregister(ddev);
 		drm_dev_unregister(ddev);
 		priv->registered = false;
 	}
@@ -565,6 +565,14 @@ static int msm_drm_init(struct device *dev, struct drm_driver *drv)
 	ret = msm_init_vram(ddev);
 	if (ret)
 		goto fail;
+
+	if (!dev->dma_parms) {
+		dev->dma_parms = devm_kzalloc(dev, sizeof(*dev->dma_parms),
+					      GFP_KERNEL);
+		if (!dev->dma_parms)
+			return -ENOMEM;
+	}
+	dma_set_max_seg_size(dev, DMA_BIT_MASK(32));
 
 	switch (get_mdp_ver(pdev)) {
 	case KMS_MDP4:
@@ -1499,14 +1507,27 @@ void msm_mode_object_event_notify(struct drm_mode_object *obj,
 
 static int msm_release(struct inode *inode, struct file *filp)
 {
-	struct drm_file *file_priv = filp->private_data;
-	struct drm_minor *minor = file_priv->minor;
-	struct drm_device *dev = minor->dev;
-	struct msm_drm_private *priv = dev->dev_private;
+	struct drm_file *file_priv;
+	struct drm_minor *minor;
+	struct drm_device *dev;
+	struct msm_drm_private *priv;
 	struct msm_drm_event *node, *temp, *tmp_node;
 	u32 count;
 	unsigned long flags;
 	LIST_HEAD(tmp_head);
+	int ret = 0;
+
+	mutex_lock(&msm_release_lock);
+
+	file_priv = filp->private_data;
+	if (!file_priv) {
+		ret = -EINVAL;
+		goto end;
+	}
+
+	minor = file_priv->minor;
+	dev = minor->dev;
+	priv = dev->dev_private;
 
 	spin_lock_irqsave(&dev->event_lock, flags);
 	list_for_each_entry_safe(node, temp, &priv->client_event_list,
@@ -1534,7 +1555,18 @@ static int msm_release(struct inode *inode, struct file *filp)
 		kfree(node);
 	}
 
-	return drm_release(inode, filp);
+	msm_preclose(dev, file_priv);
+
+       /**
+	* Handle preclose operation here for removing fb's whose
+	* refcount > 1. This operation is not triggered from upstream
+	* drm as msm_driver does not support DRIVER_LEGACY feature.
+	*/
+	ret = drm_release(inode, filp);
+	filp->private_data = NULL;
+end:
+	mutex_unlock(&msm_release_lock);
+	return ret;
 }
 
 /**
@@ -1688,7 +1720,6 @@ static struct drm_driver msm_driver = {
 				DRIVER_ATOMIC |
 				DRIVER_MODESET,
 	.open               = msm_open,
-	.preclose           = msm_preclose,
 	.postclose          = msm_postclose,
 	.lastclose          = msm_lastclose,
 	.irq_handler        = msm_irq,
@@ -1727,90 +1758,12 @@ static struct drm_driver msm_driver = {
 	.patchlevel         = MSM_VERSION_PATCHLEVEL,
 };
 
-struct work_struct resume_work;
-struct workqueue_struct *resume_wq;
-struct device *g_dev;
-bool display_early_on = false;
-
-//TODO: fix this
-extern bool pmode_tp_flag;
-extern int asus_lcd_bridge_enable;
-struct work_struct early_on_for_phone_call_work;
-
-static bool is_in_phone_call(void)
-{
-	if (pmode_tp_flag) {
-		printk("[Display] In phone call\n");
-		return true;
-	}
-
-	return false;
-}
-
-void dsi_suspend(void);
-void dsi_resume(void);
-void dsi_resume_work(struct work_struct *work)
-{
-	struct drm_device *ddev;
-	struct msm_drm_private *priv;
-	struct msm_kms *kms;
-
-	printk("[Display] doing resume from PM wq\n");
-	asus_lcd_bridge_enable = 1;
-	if (g_dev) {
-		ddev = dev_get_drvdata(g_dev);
-		if (!ddev || !ddev->dev_private) {
-			pr_err("[Display] failed to early on \n");
-			return;
-		}
-
-		priv = ddev->dev_private;
-		kms = priv->kms;
-
-		if (kms && kms->funcs && kms->funcs->pm_resume) {
-			kms->funcs->pm_resume(g_dev);
-		}
-	}
-
-	dsi_resume();
-}
-
-void dsi_early_on_for_phone_call_work(struct work_struct *work)
-{
-	printk("[Display] WQ: early on +++ \n");
-	dsi_resume();
-	printk("[Display] WQ: early on --- \n");
-}
-
-void asus_lcd_trigger_early_on_wq(void)
-{
-	// should check if pending
-	if (!asus_lcd_bridge_enable) {
-		asus_lcd_bridge_enable = 1;
-		queue_work(resume_wq, &early_on_for_phone_call_work);
-	} else {
-		printk("[Display] current enable is ongoing, abort here\n");
-	}
-}
-EXPORT_SYMBOL(asus_lcd_trigger_early_on_wq);
-
-void asus_lcd_early_on_for_phone_call(void)
-{
-	if (is_in_phone_call()) {
-		asus_lcd_trigger_early_on_wq();
-	}
-}
-EXPORT_SYMBOL(asus_lcd_early_on_for_phone_call);
-
 #ifdef CONFIG_PM_SLEEP
 static int msm_pm_suspend(struct device *dev)
 {
 	struct drm_device *ddev;
 	struct msm_drm_private *priv;
 	struct msm_kms *kms;
-
-	pr_err("going to suspend\n");
-	dsi_suspend();
 
 	if (!dev)
 		return -EINVAL;
@@ -1836,32 +1789,19 @@ static int msm_pm_resume(struct device *dev)
 	struct drm_device *ddev;
 	struct msm_drm_private *priv;
 	struct msm_kms *kms;
-	int val;
 
-	if (display_early_on) {
-		g_dev = dev;
-		queue_work(resume_wq, &resume_work);
-		display_early_on = false;
-	} else {
-		g_dev = NULL;
-	}
-
-	if (!dev) {
+	if (!dev)
 		return -EINVAL;
-	}
 
 	ddev = dev_get_drvdata(dev);
-	if (!ddev || !ddev->dev_private) {
+	if (!ddev || !ddev->dev_private)
 		return -EINVAL;
-	}
 
 	priv = ddev->dev_private;
 	kms = priv->kms;
 
-	if (!g_dev && kms && kms->funcs && kms->funcs->pm_resume) {
-		val = kms->funcs->pm_resume(dev);
-		return val;
-	}
+	if (kms && kms->funcs && kms->funcs->pm_resume)
+		return kms->funcs->pm_resume(dev);
 
 	/* enable hot-plug polling */
 	drm_kms_helper_poll_enable(ddev);
@@ -2155,8 +2095,6 @@ static int msm_pdev_probe(struct platform_device *pdev)
 	int ret;
 	struct component_match *match = NULL;
 
-	printk("[Display] msm_pdev_probe +++ \n");
-
 	ret = add_display_components(&pdev->dev, &match);
 	if (ret)
 		return ret;
@@ -2169,10 +2107,6 @@ static int msm_pdev_probe(struct platform_device *pdev)
 		return -ENODEV;
 
 	device_enable_async_suspend(&pdev->dev);
-
-	resume_wq = create_singlethread_workqueue("dsi_resume_wq");
-	INIT_WORK(&resume_work, dsi_resume_work);
-	INIT_WORK(&early_on_for_phone_call_work, dsi_early_on_for_phone_call_work);
 
 	pdev->dev.coherent_dma_mask = DMA_BIT_MASK(32);
 
@@ -2192,12 +2126,6 @@ static int msm_pdev_remove(struct platform_device *pdev)
 	component_master_del(&pdev->dev, &msm_drm_ops);
 	of_platform_depopulate(&pdev->dev);
 
-	printk("[Display] msm_pdev_remove +++ \n");
-	g_msm_drv_shutdown_in_progress = 1;
-
-	if(resume_wq)
-		destroy_workqueue(resume_wq);
-
 	msm_drm_unbind(&pdev->dev);
 	component_master_del(&pdev->dev, &msm_drm_ops);
 	return 0;
@@ -2207,9 +2135,6 @@ static void msm_pdev_shutdown(struct platform_device *pdev)
 {
 	struct drm_device *ddev = platform_get_drvdata(pdev);
 	struct msm_drm_private *priv = NULL;
-
-	printk("[Display] msm_pdev_shutdown +++ \n");
-	g_msm_drv_shutdown_in_progress = 1;
 
 	if (!ddev) {
 		DRM_ERROR("invalid drm device node\n");

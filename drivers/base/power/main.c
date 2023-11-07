@@ -39,14 +39,6 @@
 #include "../base.h"
 #include "power.h"
 
-//ASUS_BSP +++
-/*[PM] pm_pwrcs_ret:
-	This flag mean dpm_suspend has been callback.
-	pm_pwrcs_ret will be cheked in function which is resume_console in printk.c
-*/
-unsigned int pm_pwrcs_ret=0;
-//ASUS_BSP ---
-
 typedef int (*pm_callback_t)(struct device *);
 
 /*
@@ -142,7 +134,7 @@ void device_pm_add(struct device *dev)
 	device_pm_check_callbacks(dev);
 	mutex_lock(&dpm_list_mtx);
 	if (dev->parent && dev->parent->power.is_prepared)
-		dev_dbg(dev, "parent %s should not be sleeping\n",
+		dev_warn(dev, "parent %s should not be sleeping\n",
 			dev_name(dev->parent));
 	list_add_tail(&dev->power.entry, &dpm_list);
 	dev->power.in_dpm_list = true;
@@ -285,10 +277,38 @@ static void dpm_wait_for_suppliers(struct device *dev, bool async)
 	device_links_read_unlock(idx);
 }
 
-static void dpm_wait_for_superior(struct device *dev, bool async)
+static bool dpm_wait_for_superior(struct device *dev, bool async)
 {
-	dpm_wait(dev->parent, async);
+	struct device *parent;
+
+	/*
+	 * If the device is resumed asynchronously and the parent's callback
+	 * deletes both the device and the parent itself, the parent object may
+	 * be freed while this function is running, so avoid that by reference
+	 * counting the parent once more unless the device has been deleted
+	 * already (in which case return right away).
+	 */
+	mutex_lock(&dpm_list_mtx);
+
+	if (!device_pm_initialized(dev)) {
+		mutex_unlock(&dpm_list_mtx);
+		return false;
+	}
+
+	parent = get_device(dev->parent);
+
+	mutex_unlock(&dpm_list_mtx);
+
+	dpm_wait(parent, async);
+	put_device(parent);
+
 	dpm_wait_for_suppliers(dev, async);
+
+	/*
+	 * If the parent's callback has deleted the device, attempting to resume
+	 * it would be invalid, so avoid doing that then.
+	 */
+	return device_pm_initialized(dev);
 }
 
 static void dpm_wait_for_consumers(struct device *dev, bool async)
@@ -432,8 +452,6 @@ static void pm_dev_err(struct device *dev, pm_message_t state, const char *info,
 {
 	printk(KERN_ERR "PM: Device %s failed to %s%s: error %d\n",
 		dev_name(dev), pm_verb(state.event), info, error);
-	ASUSEvtlog("PM: Device %s failed to %s%s: error %d\n",
-		dev_name(dev), pm_verb(state.event), info, error);
 }
 
 static void dpm_show_time(ktime_t starttime, pm_message_t state, int error,
@@ -569,7 +587,8 @@ static int device_resume_noirq(struct device *dev, pm_message_t state, bool asyn
 	if (!dev->power.is_noirq_suspended)
 		goto Out;
 
-	dpm_wait_for_superior(dev, async);
+	if (!dpm_wait_for_superior(dev, async))
+		goto Out;
 
 	if (dev->pm_domain) {
 		info = "noirq power domain ";
@@ -709,7 +728,8 @@ static int device_resume_early(struct device *dev, pm_message_t state, bool asyn
 	if (!dev->power.is_late_suspended)
 		goto Out;
 
-	dpm_wait_for_superior(dev, async);
+	if (!dpm_wait_for_superior(dev, async))
+		goto Out;
 
 	if (dev->pm_domain) {
 		info = "early power domain ";
@@ -841,7 +861,9 @@ static int device_resume(struct device *dev, pm_message_t state, bool async)
 		goto Complete;
 	}
 
-	dpm_wait_for_superior(dev, async);
+	if (!dpm_wait_for_superior(dev, async))
+		goto Complete;
+
 	dpm_watchdog_set(&wd, dev);
 	device_lock(dev);
 
@@ -1151,10 +1173,13 @@ static int __device_suspend_noirq(struct device *dev, pm_message_t state, bool a
 	}
 
 	error = dpm_run_callback(callback, dev, state, info);
-	if (!error)
+	if (!error) {
 		dev->power.is_noirq_suspended = true;
-	else
+	} else {
 		async_error = error;
+		log_suspend_abort_reason("Callback failed on %s in %pS returned %d",
+					 dev_name(dev), callback, error);
+	}
 
 Complete:
 	complete_all(&dev->power.completion);
@@ -1312,10 +1337,13 @@ static int __device_suspend_late(struct device *dev, pm_message_t state, bool as
 	}
 
 	error = dpm_run_callback(callback, dev, state, info);
-	if (!error)
+	if (!error) {
 		dev->power.is_late_suspended = true;
-	else
+	} else {
 		async_error = error;
+		log_suspend_abort_reason("Callback failed on %s in %pS returned %d",
+					 dev_name(dev), callback, error);
+	}
 
 Complete:
 	TRACE_SUSPEND(error);
@@ -1473,7 +1501,6 @@ static int __device_suspend(struct device *dev, pm_message_t state, bool async)
 	pm_callback_t callback = NULL;
 	const char *info = NULL;
 	int error = 0;
-	char suspend_abort[MAX_SUSPEND_ABORT_LEN];
 	DECLARE_DPM_WATCHDOG_ON_STACK(wd);
 
 	TRACE_DEVICE(dev);
@@ -1496,9 +1523,6 @@ static int __device_suspend(struct device *dev, pm_message_t state, bool async)
 		pm_wakeup_event(dev, 0);
 
 	if (pm_wakeup_pending()) {
-		pm_get_active_wakeup_sources(suspend_abort,
-			MAX_SUSPEND_ABORT_LEN);
-		log_suspend_abort_reason(suspend_abort);
 		dev->power.direct_complete = false;
 		async_error = -EBUSY;
 		goto Complete;
@@ -1577,7 +1601,6 @@ static int __device_suspend(struct device *dev, pm_message_t state, bool async)
 		dev->power.is_suspended = true;
 		if (parent) {
 			spin_lock_irq(&parent->power.lock);
-
 			dev->parent->power.direct_complete = false;
 			if (dev->power.wakeup_path
 			    && !dev->parent->power.ignore_children)
@@ -1586,6 +1609,9 @@ static int __device_suspend(struct device *dev, pm_message_t state, bool async)
 			spin_unlock_irq(&parent->power.lock);
 		}
 		dpm_clear_suppliers_direct_complete(dev);
+	} else {
+		log_suspend_abort_reason("Callback failed on %s in %pS returned %d",
+					 dev_name(dev), callback, error);
 	}
 
 	device_unlock(dev);
@@ -1665,7 +1691,6 @@ int dpm_suspend(pm_message_t state)
 		if (async_error)
 			break;
 	}
-	pm_pwrcs_ret = 1; //ASUS_BSP + [PM] This flag can check dpm_suspend state for resume_console in printk.c
 	mutex_unlock(&dpm_list_mtx);
 	async_synchronize_full();
 	if (!error)
@@ -1796,6 +1821,8 @@ int dpm_prepare(pm_message_t state)
 			printk(KERN_INFO "PM: Device %s not prepared "
 				"for power transition: code %d\n",
 				dev_name(dev), error);
+			log_suspend_abort_reason("Device %s not prepared for power transition: code %d",
+						 dev_name(dev), error);
 			dpm_save_failed_dev(dev_name(dev));
 			put_device(dev);
 			break;

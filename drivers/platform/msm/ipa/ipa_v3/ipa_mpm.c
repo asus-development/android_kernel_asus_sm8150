@@ -83,6 +83,9 @@
  * 500ms, this should be less than tag timeout
  */
 #define IPA_MHIP_HOLB_TMO 2000000
+#define IPA_MPM_FLOW_CTRL_ADD 1
+#define IPA_MPM_FLOW_CTRL_DELETE 0
+#define IPA_MPM_NUM_OF_INIT_CMD_DESC 2
 
 enum mhip_re_type {
 	MHIP_RE_XFER = 0x2,
@@ -305,8 +308,8 @@ struct ipa_mpm_dev_info {
 	bool pcie_smmu_enabled;
 	struct ipa_mpm_iova_addr ctrl;
 	struct ipa_mpm_iova_addr data;
-	phys_addr_t chdb_base;
-	phys_addr_t erdb_base;
+	u32 chdb_base;
+	u32 erdb_base;
 	bool is_cache_coherent;
 };
 
@@ -479,11 +482,55 @@ static void ipa_mpm_gsi_chan_err_cb(struct gsi_chan_err_notify *err_data)
 static int ipa_mpm_set_dma_mode(enum ipa_client_type src_pipe,
 	enum ipa_client_type dst_pipe, bool reset)
 {
-	int result = 0;
+	struct ipahal_imm_cmd_pyld *cmd_pyld[IPA_MPM_NUM_OF_INIT_CMD_DESC];
+	struct ipahal_imm_cmd_register_write reg_write_coal_close;
+	struct ipahal_reg_valmask valmask;
+	struct ipa3_desc desc[IPA_MPM_NUM_OF_INIT_CMD_DESC];
+	int i, num_cmd = 0, result = 0;
 	struct ipa_ep_cfg ep_cfg = { { 0 } };
 
 	IPA_MPM_FUNC_ENTRY();
 	IPA_MPM_DBG("DMA from %d to %d reset=%d\n", src_pipe, dst_pipe, reset);
+
+	memset(desc, 0, sizeof(desc));
+	memset(cmd_pyld, 0, sizeof(cmd_pyld));
+
+	/* First step is to clear IPA Pipeline before changing DMA mode */
+	if (ipa3_get_ep_mapping(src_pipe) != IPA_EP_NOT_ALLOCATED) {
+		i = ipa3_get_ep_mapping(src_pipe);
+		reg_write_coal_close.skip_pipeline_clear = false;
+		reg_write_coal_close.pipeline_clear_options = IPAHAL_HPS_CLEAR;
+		reg_write_coal_close.offset = ipahal_get_reg_ofst(
+			IPA_AGGR_FORCE_CLOSE);
+		ipahal_get_aggr_force_close_valmask(i, &valmask);
+		reg_write_coal_close.value = valmask.val;
+		reg_write_coal_close.value_mask = valmask.mask;
+		cmd_pyld[num_cmd] = ipahal_construct_imm_cmd(
+					IPA_IMM_CMD_REGISTER_WRITE,
+					&reg_write_coal_close, false);
+
+		if (!cmd_pyld[num_cmd]) {
+			IPA_MPM_ERR("failed to construct coal close IC\n");
+			result = -ENOMEM;
+			goto destroy_imm_cmd;
+		}
+		ipa3_init_imm_cmd_desc(&desc[num_cmd], cmd_pyld[num_cmd]);
+		++num_cmd;
+	}
+	/* NO-OP IC for ensuring that IPA pipeline is empty */
+	cmd_pyld[num_cmd] =
+		ipahal_construct_nop_imm_cmd(false, IPAHAL_HPS_CLEAR, false);
+	if (!cmd_pyld[num_cmd]) {
+		IPA_MPM_ERR("failed to construct NOP imm cmd\n");
+		result = -ENOMEM;
+		goto destroy_imm_cmd;
+	}
+
+	result = ipa3_send_cmd(num_cmd, desc);
+	if (result) {
+		IPAERR("fail to send Reset Pipeline immediate command\n");
+		goto destroy_imm_cmd;
+	}
 
 	/* Reset to basic if reset = 1, otherwise set to DMA */
 	if (reset)
@@ -495,6 +542,10 @@ static int ipa_mpm_set_dma_mode(enum ipa_client_type src_pipe,
 
 	result = ipa_cfg_ep(ipa_get_ep_mapping(src_pipe), &ep_cfg);
 	IPA_MPM_FUNC_EXIT();
+
+destroy_imm_cmd:
+	for (i = 0; i < num_cmd; ++i)
+		ipahal_destroy_imm_cmd(cmd_pyld[i]);
 
 	return result;
 }
@@ -1880,24 +1931,6 @@ static int ipa_mpm_mhi_probe_cb(struct mhi_device *mhi_dev,
 		return 0;
 	}
 
-	ret = mhi_get_channel_db_base(mhi_dev,
-				      &ipa_mpm_ctx->dev_info.chdb_base);
-	if (ret) {
-		IPA_MPM_ERR("Could not populate channel db base address\n");
-		return -EINVAL;
-	}
-
-	IPA_MPM_DBG("chdb-base=0x%x\n", ipa_mpm_ctx->dev_info.chdb_base);
-
-	ret = mhi_get_event_ring_db_base(mhi_dev,
-					 &ipa_mpm_ctx->dev_info.erdb_base);
-	if (ret) {
-		IPA_MPM_ERR("Could not populate event ring db base address\n");
-		return -EINVAL;
-	}
-
-	IPA_MPM_DBG("erdb-base=0x%x\n", ipa_mpm_ctx->dev_info.erdb_base);
-
 	IPA_MPM_DBG("Received probe for id=%d\n", probe_id);
 
 	get_ipa3_client(probe_id, &ul_prod, &dl_cons);
@@ -2247,19 +2280,12 @@ static int ipa_mpm_mhi_probe_cb(struct mhi_device *mhi_dev,
 	}
 
 	atomic_inc(&ipa_mpm_ctx->probe_cnt);
-	/* Check if ODL/USB DPL pipe is connected before probe */
-	if (probe_id == IPA_MPM_MHIP_CH_ID_2) {
-		if (ipa3_is_odl_connected())
-			ret = ipa_mpm_set_dma_mode(
-				IPA_CLIENT_MHI_PRIME_DPL_PROD,
-				IPA_CLIENT_ODL_DPL_CONS, false);
-		else if (atomic_read(&ipa_mpm_ctx->adpl_over_usb_available))
-			ret = ipa_mpm_set_dma_mode(
-				IPA_CLIENT_MHI_PRIME_DPL_PROD,
-				IPA_CLIENT_USB_DPL_CONS, false);
-		if (ret)
-			IPA_MPM_ERR("DPL DMA to ODL/USB failed, ret = %d\n",
-				ret);
+	/* Check if ODL pipe is connected to MHIP DPL pipe before probe */
+	if (probe_id == IPA_MPM_MHIP_CH_ID_2 &&
+		ipa3_is_odl_connected()) {
+		IPA_MPM_DBG("setting DPL DMA to ODL\n");
+		ret = ipa_mpm_set_dma_mode(IPA_CLIENT_MHI_PRIME_DPL_PROD,
+			IPA_CLIENT_USB_DPL_CONS, false);
 	}
 	mutex_lock(&ipa_mpm_ctx->md[probe_id].mutex);
 	ipa_mpm_ctx->md[probe_id].init_complete = true;
@@ -2759,6 +2785,20 @@ static int ipa_mpm_probe(struct platform_device *pdev)
 
 	ipa_mpm_init_mhip_channel_info();
 
+	if (of_property_read_u32(pdev->dev.of_node, "qcom,mhi-chdb-base",
+		&ipa_mpm_ctx->dev_info.chdb_base)) {
+		IPA_MPM_ERR("failed to read qcom,mhi-chdb-base\n");
+		goto fail_probe;
+	}
+	IPA_MPM_DBG("chdb-base=0x%x\n", ipa_mpm_ctx->dev_info.chdb_base);
+
+	if (of_property_read_u32(pdev->dev.of_node, "qcom,mhi-erdb-base",
+		&ipa_mpm_ctx->dev_info.erdb_base)) {
+		IPA_MPM_ERR("failed to read qcom,mhi-erdb-base\n");
+		goto fail_probe;
+	}
+	IPA_MPM_DBG("erdb-base=0x%x\n", ipa_mpm_ctx->dev_info.erdb_base);
+
 	ret = ipa_mpm_populate_smmu_info(pdev);
 
 	if (ret) {
@@ -2885,23 +2925,23 @@ int ipa3_get_mhip_gsi_stats(struct ipa_uc_dbg_ring_stats *stats)
 	}
 	IPA_ACTIVE_CLIENTS_INC_SIMPLE();
 	for (i = 0; i < MAX_MHIP_CHANNELS; i++) {
-		stats->u.ring[i].ringFull = ioread32(
+		stats->ring[i].ringFull = ioread32(
 			ipa3_ctx->mhip_ctx.dbg_stats.uc_dbg_stats_mmio
 			+ i * IPA3_UC_DEBUG_STATS_OFF +
 			IPA3_UC_DEBUG_STATS_RINGFULL_OFF);
-		stats->u.ring[i].ringEmpty = ioread32(
+		stats->ring[i].ringEmpty = ioread32(
 			ipa3_ctx->mhip_ctx.dbg_stats.uc_dbg_stats_mmio
 			+ i * IPA3_UC_DEBUG_STATS_OFF +
 			IPA3_UC_DEBUG_STATS_RINGEMPTY_OFF);
-		stats->u.ring[i].ringUsageHigh = ioread32(
+		stats->ring[i].ringUsageHigh = ioread32(
 			ipa3_ctx->mhip_ctx.dbg_stats.uc_dbg_stats_mmio
 			+ i * IPA3_UC_DEBUG_STATS_OFF +
 			IPA3_UC_DEBUG_STATS_RINGUSAGEHIGH_OFF);
-		stats->u.ring[i].ringUsageLow = ioread32(
+		stats->ring[i].ringUsageLow = ioread32(
 			ipa3_ctx->mhip_ctx.dbg_stats.uc_dbg_stats_mmio
 			+ i * IPA3_UC_DEBUG_STATS_OFF +
 			IPA3_UC_DEBUG_STATS_RINGUSAGELOW_OFF);
-		stats->u.ring[i].RingUtilCount = ioread32(
+		stats->ring[i].RingUtilCount = ioread32(
 			ipa3_ctx->mhip_ctx.dbg_stats.uc_dbg_stats_mmio
 			+ i * IPA3_UC_DEBUG_STATS_OFF +
 			IPA3_UC_DEBUG_STATS_RINGUTILCOUNT_OFF);

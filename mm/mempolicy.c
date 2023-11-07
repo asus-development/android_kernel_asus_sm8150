@@ -602,11 +602,9 @@ unsigned long change_prot_numa(struct vm_area_struct *vma,
 {
 	int nr_updated;
 
-	vm_write_begin(vma);
 	nr_updated = change_protection(vma, addr, end, PAGE_NONE, 0, 1);
 	if (nr_updated)
 		count_vm_numa_events(NUMA_PTE_UPDATES, nr_updated);
-	vm_write_end(vma);
 
 	return nr_updated;
 }
@@ -2769,13 +2767,17 @@ int mpol_parse_str(char *str, struct mempolicy **mpol)
 	switch (mode) {
 	case MPOL_PREFERRED:
 		/*
-		 * Insist on a nodelist of one node only
+		 * Insist on a nodelist of one node only, although later
+		 * we use first_node(nodes) to grab a single node, so here
+		 * nodelist (or nodes) cannot be empty.
 		 */
 		if (nodelist) {
 			char *rest = nodelist;
 			while (isdigit(*rest))
 				rest++;
 			if (*rest)
+				goto out;
+			if (nodes_empty(nodes))
 				goto out;
 		}
 		break;

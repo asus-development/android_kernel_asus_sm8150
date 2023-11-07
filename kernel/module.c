@@ -1271,7 +1271,7 @@ static int try_to_force_load(struct module *mod, const char *reason)
 #endif
 }
 
-#if 0
+#ifdef CONFIG_MODVERSIONS
 
 static u32 resolve_rel_crc(const s32 *crc)
 {
@@ -1730,6 +1730,8 @@ static int module_add_modinfo_attrs(struct module *mod)
 error_out:
 	if (i > 0)
 		module_remove_modinfo_attrs(mod, --i);
+	else
+		kfree(mod->modinfo_attrs);
 	return error;
 }
 
@@ -3690,9 +3692,6 @@ static int load_module(struct load_info *info, const char __user *uargs,
 	long err;
 	char *after_dashes;
 
-	flags |= MODULE_INIT_IGNORE_MODVERSIONS;
-	flags |= MODULE_INIT_IGNORE_VERMAGIC;
-
 	err = module_sig_check(info, flags);
 	if (err)
 		goto free_copy;
@@ -4162,8 +4161,10 @@ int module_kallsyms_on_each_symbol(int (*fn)(void *, const char *,
 static void cfi_init(struct module *mod)
 {
 #ifdef CONFIG_CFI_CLANG
+	preempt_disable();
 	mod->cfi_check =
 		(cfi_check_fn)mod_find_symname(mod, CFI_CHECK_FN_NAME);
+	preempt_enable();
 	cfi_module_add(mod, module_addr_min, module_addr_max);
 #endif
 }

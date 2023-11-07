@@ -16,3 +16,4 @@
 	model = "Qualcomm Technologies, Inc. QCS410 IOT";
 	compatible = "qcom,qcs410-iot", "qcom,qcs410", "qcom,iot";
 };
+

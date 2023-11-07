@@ -16,7 +16,7 @@
 #include "trinketp-iot.dtsi"
 
 / {
-	model = "Qualcomm Technologies, Inc. TRINKET SoC";
+	model = "Qualcomm Technologies, Inc. TRINKETP SoC";
 	compatible = "qcom,trinketp-iot";
 	qcom,board-id = <0 0>;
 };

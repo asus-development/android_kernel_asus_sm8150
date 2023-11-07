@@ -1567,7 +1567,9 @@ int hid_report_raw_event(struct hid_device *hid, int type, u8 *data, u32 size,
 
 	rsize = ((report->size - 1) >> 3) + 1;
 
-	if (rsize > HID_MAX_BUFFER_SIZE)
+	if (report_enum->numbered && rsize >= HID_MAX_BUFFER_SIZE)
+		rsize = HID_MAX_BUFFER_SIZE - 1;
+	else if (rsize > HID_MAX_BUFFER_SIZE)
 		rsize = HID_MAX_BUFFER_SIZE;
 
 	if (csize < rsize) {
@@ -2318,6 +2320,12 @@ static const struct hid_device_id hid_have_special_driver[] = {
 #if IS_ENABLED(CONFIG_HID_PLANTRONICS)
 	{ HID_USB_DEVICE(USB_VENDOR_ID_PLANTRONICS, HID_ANY_ID) },
 #endif
+#if IS_ENABLED(CONFIG_HID_PLAYSTATION)
+	{ HID_BLUETOOTH_DEVICE(USB_VENDOR_ID_SONY,
+	USB_DEVICE_ID_SONY_PS5_CONTROLLER) },
+	{ HID_USB_DEVICE(USB_VENDOR_ID_SONY,
+	USB_DEVICE_ID_SONY_PS5_CONTROLLER) },
+#endif
 #if IS_ENABLED(CONFIG_HID_PRIMAX)
 	{ HID_USB_DEVICE(USB_VENDOR_ID_PRIMAX, USB_DEVICE_ID_PRIMAX_KEYBOARD) },
 #endif
@@ -2454,7 +2462,6 @@ static const struct hid_device_id hid_have_special_driver[] = {
 #if IS_ENABLED(CONFIG_HID_STEAM)
 	{ HID_USB_DEVICE(USB_VENDOR_ID_VALVE, USB_DEVICE_ID_STEAM_CONTROLLER) },
 	{ HID_USB_DEVICE(USB_VENDOR_ID_VALVE, USB_DEVICE_ID_STEAM_CONTROLLER_WIRELESS) },
-	{ HID_BLUETOOTH_DEVICE(USB_VENDOR_ID_VALVE, USB_DEVICE_ID_STEAM_CONTROLLER_BT) },
 #endif
 #if IS_ENABLED(CONFIG_HID_WALTOP)
 	{ HID_USB_DEVICE(USB_VENDOR_ID_WALTOP, USB_DEVICE_ID_WALTOP_SLIM_TABLET_5_8_INCH) },
@@ -2591,7 +2598,6 @@ static int hid_device_probe(struct device *dev)
 		}
 
 		hdev->driver = hdrv;
-		pr_info("[USB] hid_device_probe, driver name=%s\n",hdev->driver->name);
 		if (hdrv->probe) {
 			ret = hdrv->probe(hdev, id);
 		} else { /* default probe */

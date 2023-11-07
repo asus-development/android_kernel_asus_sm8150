@@ -15,6 +15,7 @@
 
 #include "sa8195p-adp-common.dtsi"
 #include "sa8195p-adp-star-display.dtsi"
+#include "sa8195p-adp-star-display-shd.dtsi"
 
 / {
 	model = "ADP-AIR";
@@ -23,3 +24,8 @@
 	qcom,board-id = <0x02010019 0>;
 };
 
+&qupv3_se0_spi {
+	can-controller@0 {
+		status = "disabled";
+	};
+};

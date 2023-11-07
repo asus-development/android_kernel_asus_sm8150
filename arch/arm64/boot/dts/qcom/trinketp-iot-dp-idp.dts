@@ -17,7 +17,7 @@
 #include "trinketp-iot-idp.dtsi"
 
 / {
-	model = "Qualcomm Technologies, Inc. TRINKET IOT Disp. Port Enable IDP";
+	model = "Qualcomm Technologies, Inc. TRINKETIOT Disp. Port Enable IDP";
 	compatible = "qcom,trinketp-iot-idp", "qcom,trinketp-iot", "qcom,idp";
 	qcom,board-id = <34 4>;
 };

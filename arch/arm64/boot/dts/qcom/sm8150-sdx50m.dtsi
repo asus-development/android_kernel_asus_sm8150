@@ -91,6 +91,14 @@
 		mhi_chan@110 {
 			status = "disabled";
 		};
+
+		mhi_chan@109 {
+			status = "disabled";
+		};
+
+		mhi_chan@110 {
+			status = "disabled";
+		};
 	};
 
 	mhi_events {

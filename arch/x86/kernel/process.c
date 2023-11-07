@@ -417,11 +417,9 @@ static __always_inline void __speculation_ctrl_update(unsigned long tifp,
 	/* Handle change of TIF_SSBD depending on the mitigation method. */
 	if (static_cpu_has(X86_FEATURE_VIRT_SSBD)) {
 		if (tif_diff & _TIF_SSBD)
- 			amd_set_ssb_virt_state(tifn);
+			amd_set_ssb_virt_state(tifn);
 	} else if (static_cpu_has(X86_FEATURE_LS_CFG_SSBD)) {
 		if (tif_diff & _TIF_SSBD)
-			amd_set_ssb_virt_state(tifn);
-		} else if (static_cpu_has(X86_FEATURE_LS_CFG_SSBD)) {
 			amd_set_core_ssb_state(tifn);
 	} else if (static_cpu_has(X86_FEATURE_SPEC_CTRL_SSBD) ||
 		   static_cpu_has(X86_FEATURE_AMD_SSBD)) {

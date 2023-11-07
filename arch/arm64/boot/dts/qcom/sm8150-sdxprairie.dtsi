@@ -187,6 +187,69 @@
 		};
 	};
 
+	mhi_events {
+		mhi_event@5 {
+			mhi,chan = <100>;
+			mhi,hw-ev;
+		};
+
+		mhi_event@6 {
+			mhi,chan = <101>;
+			mhi,hw-ev;
+			mhi,client-manage;
+		};
+
+		mhi_event@7 {
+			mhi,chan = <102>;
+			mhi,hw-ev;
+			mhi,client-manage;
+			mhi,offload;
+		};
+
+		mhi_event@8 {
+			mhi,chan = <103>;
+			mhi,hw-ev;
+		};
+
+		mhi_event@9 {
+			mhi,chan = <105>;
+			mhi,hw-ev;
+			mhi,client-manage;
+			mhi,offload;
+		};
+
+		mhi_event@10 {
+			mhi,chan = <106>;
+			mhi,hw-ev;
+			mhi,client-manage;
+			mhi,offload;
+		};
+
+		mhi_event@11 {
+			mhi,chan = <107>;
+			mhi,hw-ev;
+			mhi,client-manage;
+			mhi,offload;
+		};
+
+		mhi_event@12 {
+			mhi,chan = <108>;
+			mhi,hw-ev;
+			mhi,client-manage;
+			mhi,offload;
+		};
+
+		mhi_event@13 {
+			mhi,chan = <109>;
+			mhi,hw-ev;
+		};
+
+		mhi_event@14 {
+			mhi,chan = <110>;
+			mhi,hw-ev;
+		};
+	};
+
 	mhi_devices {
 		mhi_qrtr {
 			qcom,net-id = <3>;

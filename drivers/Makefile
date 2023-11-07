@@ -190,13 +190,4 @@ obj-$(CONFIG_SENSORS_SSC)	+= sensors/
 obj-$(CONFIG_ESOC)              += esoc/
 # GNSS driver
 obj-$(CONFIG_GNSS_SIRF)		+= gnsssirf/
-#randy mcu driver
-obj-y				+= msp/
 obj-$(CONFIG_GNSS)		+= gnss/
-
-#Tuxera
-ifdef CONFIG_TUXERA_USERDEBUG
-obj-y				+= exfat/zs630kl/userdebug/
-else
-obj-y				+= exfat/zs630kl/user/
-endif
