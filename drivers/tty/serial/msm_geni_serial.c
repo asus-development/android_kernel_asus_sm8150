@@ -3154,6 +3154,16 @@ exit_ver_info:
 	return ret;
 }
 
+unsigned uart_info = 0;
+EXPORT_SYMBOL(uart_info);
+
+static int __init get_uart_info(char *p)
+{
+	uart_info = 1;
+	return 0;
+}
+early_param("UART", get_uart_info);
+
 static int msm_geni_serial_probe(struct platform_device *pdev)
 {
 	int ret = 0;
