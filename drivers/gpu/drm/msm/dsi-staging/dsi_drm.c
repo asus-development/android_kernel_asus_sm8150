@@ -264,10 +264,12 @@ static void dsi_bridge_enable(struct drm_bridge *bridge)
 
 	if (display && display->drm_conn) {
 		sde_connector_helper_bridge_enable(display->drm_conn);
+
 		if (c_bridge->dsi_mode.dsi_mode_flags & DSI_MODE_FLAG_POMS)
 			sde_connector_schedule_status_work(display->drm_conn,
 				true);
 	}
+
 	dsi_on = true;
 
 }
@@ -286,6 +288,7 @@ static void dsi_bridge_disable(struct drm_bridge *bridge)
 		pr_err("Invalid params\n");
 		return;
 	}
+
 	display = c_bridge->display;
 
 	private_flags =
@@ -337,6 +340,7 @@ static void dsi_bridge_post_disable(struct drm_bridge *bridge)
 		return;
 	}
 	SDE_ATRACE_END("dsi_bridge_post_disable");
+
 	dsi_on = false;
 	display_early_init = 0;
 }
