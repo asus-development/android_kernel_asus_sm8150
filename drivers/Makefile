@@ -191,3 +191,10 @@ obj-$(CONFIG_ESOC)              += esoc/
 # GNSS driver
 obj-$(CONFIG_GNSS_SIRF)		+= gnsssirf/
 obj-$(CONFIG_GNSS)		+= gnss/
+
+#Tuxera
+ifdef CONFIG_TUXERA_USERDEBUG
+obj-y				+= exfat/zs630kl/userdebug/
+else
+obj-y				+= exfat/zs630kl/user/
+endif
